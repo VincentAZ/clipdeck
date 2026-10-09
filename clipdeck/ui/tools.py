@@ -127,10 +127,11 @@ class ToolsPage(Gtk.Box):
             self._lossless = ops.can_concat_losslessly([i.info for i in clips])
         lossless = self._lossless
         if len(clips) >= 2 and not lossless:
-            self.m_reencode.set_active(True)
+            if not self.m_reencode.get_active():
+                self._forced = True            # remember that we, not the user, turned it on
+                self.m_reencode.set_active(True)
             self.m_reencode.set_sensitive(False)
             self.m_reencode.set_subtitle("Clips differ in format, so they must be re-encoded")
-            self._forced = True
         else:
             if self._forced:               # undo a switch we flipped, not one the user did
                 self._forced = False
@@ -152,6 +153,8 @@ class ToolsPage(Gtk.Box):
 
     def _move(self, item, delta):
         clips = self._ready_order()
+        if item not in clips:      # re-probing after a change; the list refreshes shortly
+            return
         i = clips.index(item)
         j = i + delta
         if 0 <= j < len(clips):

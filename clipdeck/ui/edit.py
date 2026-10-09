@@ -405,11 +405,19 @@ class EditPage(Gtk.Box):
         checks = {
             "fmt": self.fmt.get_key(), "vcodec": self.vcodec.get_key(),
             "acodec": self.acodec.get_key(), "quality": self.quality.get_key(),
+            "audio_kbps": int(self.abr.get_key() or 0),
+            "bake_rotation": self.bake.get_active(),
+            "scale_height": int(self.resize.get_key()) if self.resize.get_key().isdigit() else -1,
         }
+        defaults = {"bake_rotation": True, "scale_height": 0}
         for k, v in checks.items():
-            if k in values and values[k] != v:
+            want = values.get(k, defaults.get(k))
+            if want is not None and want != v:
                 return False
-        if "target_mb" in values and not self.target.get_enable_expansion():
+        tm = values.get("target_mb", 0)
+        if bool(tm) != self.target.get_enable_expansion():
+            return False
+        if tm and abs(self.target_mb.get_value() - tm) > 1e-6:
             return False
         return True
 
@@ -598,7 +606,7 @@ class EditPage(Gtk.Box):
 
     def _aspect(self, ratio: float):
         info = self._first_info()
-        if not info:
+        if not info or not all(info.display_size):
             return
         w, h = info.display_size
         if w / h > ratio:
@@ -635,6 +643,9 @@ class EditPage(Gtk.Box):
         def done(res):
             self.detect_btn.set_sensitive(True)
             self.detect_btn.set_label("Detect black bars")
+            cur = self._first_info()
+            if cur is None or cur.path != info.path:
+                return False     # selection changed meanwhile: not this clip's bars
             if res is None:
                 self.ctx.toast("No black bars found")
             else:

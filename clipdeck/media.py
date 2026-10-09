@@ -102,6 +102,9 @@ class MediaInfo:
     audio: list[AudioStream] = field(default_factory=list)
     subtitle_count: int = 0
     is_image_seq: bool = False
+    preroll: bool = False      # MP4/MOV edit list hides frames before the start
+    mtime_ns: int = 0          # to detect the file changing after a job was planned
+    has_cover: bool = False    # attached picture (cover art) stream present
 
     @property
     def name(self) -> str:
@@ -237,6 +240,8 @@ def probe(path: str, timeout: float = 30) -> MediaInfo:
     for s in streams:
         kind = s.get("codec_type")
         disp = s.get("disposition") or {}
+        if kind == "video" and disp.get("attached_pic"):
+            info.has_cover = True
         if kind == "video" and not info.vcodec and not disp.get("attached_pic"):
             info.vcodec = s.get("codec_name", "") or ""
             info.vprofile = s.get("profile", "") or ""
@@ -285,14 +290,40 @@ def probe(path: str, timeout: float = 30) -> MediaInfo:
         info.duration = _scan_duration(path, timeout)
     if info.vcodec in ("png", "mjpeg", "bmp", "webp", "tiff") and info.duration == 0:
         info.is_image_seq = True
+    if info.vcodec and (info.width <= 0 or info.height <= 0):
+        raise ProbeError("Video stream has no picture size (damaged or incomplete file)")
+    if info.vcodec and info.container in ("mp4", "mov", "m4v", "3gp"):
+        info.preroll = _has_preroll(path)
+    try:
+        info.mtime_ns = os.stat(path).st_mtime_ns
+    except OSError:
+        pass
     return info
+
+
+def _has_preroll(path: str) -> bool:
+    """Negative video timestamps at the start = an edit list hiding frames (left by
+    keyframe trims). Other containers ignore edit lists and would show those frames."""
+    try:
+        res = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                              "-read_intervals", "%+#5", "-show_entries", "packet=pts_time",
+                              "-of", "csv=p=0", path], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    for tok in res.stdout.split():
+        try:
+            if float(tok.strip(",")) < -0.001:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _scan_duration(path: str, timeout: float) -> float:
     try:
         res = subprocess.run(["ffmpeg", "-v", "quiet", "-nostdin", "-i", path, "-map", "0",
                               "-c", "copy", "-f", "null", "-progress", "pipe:1", "-"],
-                             capture_output=True, text=True, timeout=max(timeout, 120))
+                             capture_output=True, text=True, timeout=max(timeout, 900))
     except (OSError, subprocess.TimeoutExpired):
         return 0.0
     us = [line.split("=", 1)[1] for line in res.stdout.splitlines()

@@ -159,8 +159,6 @@ class Expect:
     acodec: str = ""                  # "" means no audio track expected
     audio_tracks: list = field(default_factory=list)   # [(codec, rate, channels)] per track
     audio_count: int = 0
-    sample_rate: int = 0
-    channels: int = 0
     duration: float = 0.0
     dur_tol: float = 0.1
     min_duration: float | None = None
@@ -262,29 +260,19 @@ def same_framing(a: str, b: str) -> bool:
     return (a in ANNEXB_CONTAINERS) == (b in ANNEXB_CONTAINERS)
 
 
-def has_preroll(path: str) -> bool:
-    """True when the first packets have negative timestamps (an edit list hides frames
-    before the start, as left by keyframe trims). Such clips cannot be concatenated
-    losslessly: the concat demuxer would expose the hidden frames."""
-    try:
-        # video only: AAC audio always starts slightly negative (encoder priming)
-        res = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                              "-read_intervals", "%+#5",
-                              "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
-                             capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return True
-    for line in res.stdout.split():
-        try:
-            if float(line.strip(",")) < -0.001:
-                return True
-        except ValueError:
-            continue
-    return False
+_TONEMAP_CORE = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+                 "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
 
 
-HDR_TONEMAP = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
-               "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+def tonemap_chain(info: MediaInfo) -> str:
+    """HDR -> SDR. Phones often tag only the transfer function, and zscale cannot convert
+    from 'unknown' primaries/matrix, so declare the missing ones (BT.2020) first."""
+    known = lambda v: v and v not in ("unknown", "reserved", "unspecified")  # noqa: E731
+    prim = info.color_primaries if known(info.color_primaries) else "bt2020"
+    space = info.color_space if known(info.color_space) else "bt2020nc"
+    rng = "pc" if info.color_range == "pc" else "tv"
+    return (f"setparams=color_primaries={prim}:color_trc={info.color_transfer}:"
+            f"colorspace={space}:range={rng},{_TONEMAP_CORE}")
 SDR_TAGS = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
 
 
@@ -569,6 +557,8 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
         if want_v not in ("auto", "copy") and want_v not in fmt.vcodecs:
             raise PlanError(f"{VCODEC_LABELS.get(want_v, want_v)} cannot go in {fmt.label}")
         copy_ok_codec = "*" in fmt.copy_v or info.vcodec in fmt.copy_v
+        # hidden pre-roll (MP4 edit list) only stays hidden in MP4/MOV
+        preroll_exposed = info.preroll and fmt.ext not in ("mp4", "mov", "m4v")
         needs_pixels = (r.has_video_filters() or (r.trimmed() and r.trim_exact)
                         or r.target_mb > 0)
         if r.rotate_lossless:
@@ -582,6 +572,9 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
             if r.trimmed() and r.trim_exact:
                 raise PlanError("Lossless rotation cannot be combined with an exact trim; "
                                 "use a fast (keyframe) trim")
+            if r.target_mb > 0:
+                raise PlanError("Lossless rotation copies the video, so it cannot aim for a "
+                                "target file size")
             vmode = "copy"
             lossless_rot = normalize_rotation(info.rotation - (r.rotate % 360))
         else:
@@ -606,11 +599,17 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
                                     + "; pick an encoder")
                 if not copy_ok_codec:
                     raise PlanError(f"{info.vcodec} video cannot be copied into {fmt.label}")
+                if info.container == "avi" and fmt.ext in ("mp4", "mov"):
+                    raise PlanError("AVI video has no reliable timestamps and cannot be copied "
+                                    "into MP4/MOV; use Automatic (re-encodes)")
+                if preroll_exposed:
+                    raise PlanError("This clip was cut on a keyframe and hides frames before "
+                                    f"its start; {fmt.label} would show them. Use Automatic")
                 vmode = "copy"
             elif want_v == "auto":
                 # AVI has no real timestamps: copied B-frame video ends up with
                 # out-of-order timestamps in any modern container, so re-encode it
-                vmode = "copy" if (copy_ok_codec and not needs_pixels
+                vmode = "copy" if (copy_ok_codec and not needs_pixels and not preroll_exposed
                                    and info.container != "avi") else "encode"
             else:
                 vmode = "encode"
@@ -634,15 +633,18 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
         want_a = r.acodec
         if want_a not in ("auto", "copy") and want_a not in fmt.acodecs:
             raise PlanError(f"{ACODEC_LABELS.get(want_a, want_a)} audio cannot go in {fmt.label}")
-        acopy_ok = ("*" in fmt.copy_a or all(a.codec in fmt.copy_a for a in info.audio))
+        used = info.audio[:1] if fmt.kind == "audio" else info.audio
+        acopy_ok = ("*" in fmt.copy_a or all(a.codec in fmt.copy_a for a in used))
         # copied audio can only start on a packet boundary near the keyframe, so an
         # exact cut needs re-encoded audio (MP4 hides the excess, MKV/WebM play it)
-        exact_cut = r.trimmed() and r.trim_exact and vmode != "copy"
+        exact_cut = (r.trimmed() and r.trim_exact and vmode != "copy") or \
+            (info.preroll and fmt.ext not in ("mp4", "mov", "m4v"))
         if want_a == "copy":
             if r.has_audio_filters():
                 raise PlanError("Copying audio is impossible with speed or volume changes")
             if exact_cut:
-                raise PlanError("Copying audio is impossible with a frame-accurate trim")
+                raise PlanError("Copying audio is impossible here: the cut must be exact "
+                                "(frame-accurate trim, or a keyframe-trimmed source)")
             if not acopy_ok:
                 raise PlanError(f"{info.acodec} audio cannot be copied into {fmt.label}")
             amode = "copy"
@@ -694,7 +696,11 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
                      and amode in ("copy", "none") and keep_audio == info.has_audio)
         if remux_all:
             # Matroska to Matroska: keep subtitles, extra tracks and attachments too
-            argv += ["-map", "0", "-map", "-0:d?", "-c:s", "copy", "-c:t", "copy"]
+            # 0:V = video that is not an attached picture (cover art would become a track)
+            argv += ["-map", "0", "-map", "-0:v", "-map", "0:V", "-map", "-0:d?",
+                     "-c:s", "copy", "-c:t", "copy"]
+            if info.has_cover:
+                summary.append("Cover art dropped (it would become a video track)")
             if info.subtitle_count:
                 summary.append(f"{info.subtitle_count} subtitle track(s) kept")
         else:
@@ -712,28 +718,44 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
             tonemap = info.is_hdr and (venc in ("libx264", "h264_nvenc", "libvpx-vp9", "dnxhd")
                                        or info.bit_depth <= 8)
             if tonemap:
-                vf.append(HDR_TONEMAP)
+                vf.append(tonemap_chain(info))
                 summary.append("HDR tone-mapped to SDR (this codec is 8-bit)")
+            # timing: an explicit rate wins; speed changes need a new constant rate (a coarse
+            # source time base would otherwise produce duplicate timestamps); VFR sources keep
+            # their timestamps; constant-rate sources stay exactly constant
             rate = r.fps or (snap_rate(info.fps) if r.cfr else 0)
+            if not rate and r.speed != 1.0:
+                rate = snap_rate(min(60.0, (info.r_fps or info.fps or 30) * r.speed))
+            if r.speed != 1.0:                   # retime first, then sample at the new rate
+                vf.append(f"setpts=PTS/{r.speed:.6g}")
             if rate:
                 vf.append(f"fps={rate_expr(rate)}")
-            if r.speed != 1.0:
-                vf.append(f"setpts=PTS/{r.speed:.6g}")
             if vf:
                 argv += ["-vf", ",".join(vf)]
             if rate:
                 argv += ["-fps_mode", "cfr"]
                 # frame-rate conversion snaps the end to the new frame grid
                 expect.dur_tol = max(expect.dur_tol, 0.15 + 3.0 / rate)
+            elif (info.container in ("mkv", "webm") and info.fps and info.r_fps
+                  and abs(info.fps - info.r_fps) / info.r_fps < 0.001):
+                # Matroska stores millisecond timestamps, so an exactly constant-rate
+                # source (29.97 fps) would carry ±1 ms jitter into MOV/MP4: re-time it
+                argv += ["-fps_mode", "cfr"]
             else:
-                # keep every frame with its original timestamp; some muxers (MOV) would
-                # otherwise default to constant rate and silently drop/duplicate frames
-                # (and encode in the source's own time base so no two timestamps collide)
+                # keep every frame with its original timestamp. MOV would otherwise default
+                # to constant rate and silently drop frames (seen on Pixel footage); phone
+                # clips that look constant often are not quite, and forcing cfr adds or
+                # drops frames. The source's own time base keeps timestamps from colliding.
                 argv += ["-fps_mode", "passthrough", "-enc_time_base:v", "demux"]
             expect.width, expect.height = ow, oh
             expect.rotation = info.rotation if keep_flag else 0
             if keep_flag:
                 summary.append(f"Keeps the {abs(info.rotation)}° rotation flag (not made upright)")
+            elif info.rotation:
+                summary.append(f"Made upright (was stored sideways with a {abs(info.rotation)}° "
+                               "flag)")
+            if r.cfr and not r.fps:
+                summary.append(f"Constant frame rate {rate:g} fps")
             summary.append(f"Video: {info.vcodec} → {VCODEC_LABELS[_key_for(venc)]}"
                            f"{' (GPU)' if venc.endswith('_nvenc') else ''}, {ow}×{oh}")
         else:
@@ -812,7 +834,7 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
     cleanup: list[str] = []
     if r.target_mb > 0 and vmode == "encode":
         total_bits = r.target_mb * 8 * 1024 * 1024
-        abits = (r.audio_kbps * 1000 if amode == "encode" else
+        abits = (r.audio_kbps * 1000 * max(1, len(expect.audio_tracks)) if amode == "encode" else
                  sum(a.bitrate or 128000 for a in info.audio) if amode == "copy" else 0)
         vbit = int(total_bits / max(out_dur, 0.1) * 0.97 - abits)
         if vbit < 50_000:
@@ -887,16 +909,16 @@ def _build_gif(info: MediaInfo, r: Recipe, out_dir, taken, title) -> Plan:
     gr = replace(r, scale_width=0, scale_height=0)
     vf, w, h = _geometry(info, gr, need_even=False)
     if info.is_hdr:
-        vf.append(HDR_TONEMAP)
+        vf.append(tonemap_chain(info))
     if r.gif_width and r.gif_width < w:
         nh = max(1, int(round(h * r.gif_width / w)))
         vf.append(f"scale={r.gif_width}:{nh}:flags=lanczos")
         w, h = r.gif_width, nh
     rate = r.gif_fps if (r.gif_fps and (not info.fps or r.gif_fps < info.fps)) else 0
-    if rate:
-        vf.append(f"fps={rate_expr(rate)}")
     if r.speed != 1.0:
         vf.append(f"setpts=PTS/{r.speed:.6g}")
+    if rate:
+        vf.append(f"fps={rate_expr(rate)}")
     chain = ",".join(vf) + "," if vf else ""
     if r.gif_per_frame_palette:
         graph = (f"[0:v:0]{chain}split[g0][g1];[g0]palettegen=max_colors=256:stats_mode=single[p];"
@@ -970,7 +992,8 @@ def can_concat_losslessly(infos: list[MediaInfo]) -> bool:
     a = infos[0]
 
     def sig(i: MediaInfo):
-        return (i.vcodec, i.width, i.height, i.rotation, i.pix_fmt, round(i.fps or 0, 2),
+        return (i.vcodec, i.width, i.height, i.rotation, i.sar, i.color_transfer,
+                i.color_primaries, i.pix_fmt, round(i.fps or 0, 2),
                 i.vprofile, len(i.audio),
                 tuple((s.codec, s.sample_rate, s.channels) for s in i.audio))
     if not a.has_video or a.vcodec not in ("h264", "hevc"):
@@ -979,7 +1002,7 @@ def can_concat_losslessly(infos: list[MediaInfo]) -> bool:
         return False          # the joined file is MP4
     if not all(sig(i) == sig(a) for i in infos[1:]):
         return False
-    return not any(has_preroll(i.path) for i in infos)
+    return not any(i.preroll for i in infos)
 
 
 def _concat_escape(path: str) -> str:
@@ -1013,8 +1036,8 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
                         rotation=first.rotation, duration=total, dur_tol=0.1 * len(infos) + 0.3,
                         acodec=first.acodec if any_audio else "",
                         audio_count=len(first.audio) if any_audio else 0,
-                        sample_rate=first.audio[0].sample_rate if any_audio else 0,
-                        channels=first.audio[0].channels if any_audio else 0,
+                        audio_tracks=[(t.codec, t.sample_rate, t.channels) for t in first.audio]
+                        if any_audio else [],
                         frames=sum(i.nb_frames for i in infos) if all(i.nb_frames for i in infos)
                         else None)
         plan = Plan(title=os.path.basename(out), inputs=infos, output=out, temp=tmp,
@@ -1039,7 +1062,8 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
     parts, labels = [], []
     for n, i in enumerate(infos):
         # square pixels first, so anamorphic clips keep their real shape
-        parts.append(f"[{n}:v:0]scale=trunc(iw*sar/2)*2:ih,setsar=1,"
+        tm = tonemap_chain(i) + "," if i.is_hdr else ""   # output is 8-bit SDR
+        parts.append(f"[{n}:v:0]{tm}scale=trunc(iw*sar/2)*2:ih,setsar=1,"
                      f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
                      f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={rate_expr(F)},format=yuv420p[v{n}]")
         if any_audio:
@@ -1059,14 +1083,14 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
     choice = r.vcodec if r.vcodec in ("h264", "hevc", "av1") else "h264"
     venc = resolve_encoder(choice, r.gpu, encoders)
     fake = replace(first, bit_depth=8)
-    argv += video_encoder_args(venc, r, fake)
+    argv += video_encoder_args(venc, r, fake) + SDR_TAGS
     if any_audio:
         argv += ["-c:a", "aac", "-b:a", f"{r.audio_kbps}k", "-ar", "48000", "-ac", "2"]
     argv += ["-movflags", "+faststart", tmp]
     expect = Expect(kind="video", vcodec=VCODEC_NAME[choice], width=W, height=H, rotation=0,
                     duration=total, dur_tol=0.15 * len(infos) + 0.4,
                     acodec="aac" if any_audio else "", audio_count=1 if any_audio else 0,
-                    sample_rate=48000 if any_audio else 0, channels=2 if any_audio else 0)
+                    audio_tracks=[("aac", 48000, 2)] if any_audio else [])
     return Plan(title=os.path.basename(out), inputs=infos, output=out, temp=tmp,
                 steps=[Step(argv, "Merging (re-encode)", total)], expect=expect,
                 summary=[f"Join {len(infos)} clips → {W}×{H} @ {F:.3g} fps, "

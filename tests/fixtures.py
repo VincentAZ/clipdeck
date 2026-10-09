@@ -118,6 +118,24 @@ def media_dir() -> str:
         "-vf", "setpts='(N*0.0418-floor(N/4)*0.0085)/TB'", "-fps_mode", "passthrough",
         "-video_track_timescale", "90000", "-c:v", "libx265", "-x265-params", "log-level=none",
         "-tag:v", "hvc1", j("cadence.mp4"))
+    # ---- second review
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=2", "-c:v", "libx264",
+        "-video_track_timescale", "30", j("ts30.mp4"))
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=1", "-c:v", "libx265",
+        "-x265-params", "log-level=none:transfer=smpte2084", "-pix_fmt", "yuv420p10le",
+        "-tag:v", "hvc1", j("hdr_trc_only.mp4"))
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=20", "-f", "lavfi", "-i", "sine=d=20",
+        "-f", "lavfi", "-i", "sine=f=700:d=20", "-map", "0", "-map", "1", "-map", "2",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-b:a", "192k", "-shortest",
+        j("two20.mkv"))
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=2", "-f", "lavfi", "-i", "sine=d=2",
+        "-f", "lavfi", "-i", "sine=f=500:d=2", "-map", "0", "-map", "1", "-map", "2",
+        "-c:v", "libx264", "-c:a:0", "aac", "-c:a:1", "ac3", "-shortest", j("aac_ac3.mkv"))
+    run("-f", "lavfi", "-i", "testsrc2=s=64x64", "-frames:v", "1", j("cover.jpg"))
+    run("-i", j("subs.mkv"), "-attach", j("cover.jpg"), "-metadata:s:t", "mimetype=image/jpeg",
+        "-metadata:s:t", "filename=cover.jpg", "-map", "0", "-c", "copy", j("cover.mkv"))
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30000/1001:d=2", "-c:v", "mpeg4",
+        j("ntsc.mkv"))
     # a still image
     run("-f", "lavfi", "-i", "testsrc2=s=320x180", "-frames:v", "1", j("still.png"))
     # garbage that only pretends to be a video

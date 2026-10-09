@@ -6,6 +6,7 @@ from __future__ import annotations
 import itertools
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -98,8 +99,9 @@ class JobQueue:
             self._closing = True
             self._cv.notify_all()
         self.cancel_all()
+        deadline = time.monotonic() + wait          # one shared budget, not per worker
         for t in self._workers:
-            t.join(wait)
+            t.join(max(0.0, deadline - time.monotonic()))
         # a worker that did not stop in time must not leave a hidden partial file behind
         for j in self.jobs:
             if not j.finished:

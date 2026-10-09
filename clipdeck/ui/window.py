@@ -63,6 +63,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.settings = settings
         self._quit_confirmed = False
         self._announced: set[int] = set()
+        self._closed = False
         self._batch: list[Job] = []          # finished since the queue last drained
         self._last_toast: Adw.Toast | None = None
         self.library = Library(on_item_ready=self._item_ready)
@@ -323,6 +324,8 @@ class MainWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._job_changed, job)
 
     def _job_changed(self, job: Job):
+        if self._closed:
+            return False         # late callbacks after the window was torn down
         self.queue_page.job_changed(job)
         if not job.finished or job.id in self._announced:
             return False
@@ -378,6 +381,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _shutdown(self):
         """Cancel everything (partial files are removed by the workers) and stop players."""
+        self._closed = True
         self.queue.shutdown(wait=8)
         for p in self.pages:
             if hasattr(p, "player"):

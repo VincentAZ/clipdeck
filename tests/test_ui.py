@@ -33,6 +33,7 @@ def scenario(app, win):
               "part 'b'.mp4", "fake.mp4"):
         shutil.copy(os.path.join(src, n), work)
     shutil.copy(os.path.join(src, "upright.mp4"), os.path.join(work, "Tom & Jerry <1>.mp4"))
+    shutil.copy(os.path.join(src, "part a.mp4"), os.path.join(work, "part a copy.mp4"))
 
     def fake_trash(p):
         shutil.move(p, os.path.join(trash_dir, os.path.basename(p)))
@@ -63,7 +64,7 @@ def scenario(app, win):
 
     # ---------------------------------------------------------------- library
     win.add_paths([work])
-    yield Wait(lambda: len(win.library) == 9 and
+    yield Wait(lambda: len(win.library) == 10 and
                all(i.state != "probing" for i in win.library.items()), "probing")
     bad = win.library.find(os.path.join(work, "fake.mp4"))
     check(bad.state == "error", "fake.mp4 should be unreadable")
@@ -71,7 +72,7 @@ def scenario(app, win):
     check(win.library.find(os.path.join(work, "Tom & Jerry <1>.mp4")).ready, "markup name")
     # adding the same folder again must not duplicate anything
     win.add_paths([work])
-    check(len(win.library) == 9, "duplicates added")
+    check(len(win.library) == 10, "duplicates added")
     yield 1.5     # thumbnails
 
     # ---------------------------------------------------------------- inspect
@@ -142,6 +143,17 @@ def scenario(app, win):
         if key in ("mp3", "wav"):
             check(not e.geo_group.get_visible(), "no rotate for audio")
     screenshot(win, f"{SHOTS}/ui-05-edit-wav.png")
+    # changing a preset's own setting flips the label to Custom
+    e.preset.set_key("chat")
+    yield 0.2
+    e.resize.set_key("480")
+    yield 0.2
+    check(e.preset.get_key() == "custom", f"preset label stale: {e.preset.get_key()}")
+    e.preset.set_key("remux")
+    yield 0.2
+    e.bake.set_active(True)
+    yield 0.2
+    check(e.preset.get_key() == "custom", "remux preset label stale after Make upright")
     e.preset.set_key("share")
     yield 0.2
     e.rot.set_active_name("90")
@@ -222,6 +234,22 @@ def scenario(app, win):
     check(t._ready_order()[0] is second, "reorder")
     yield 0.4
     screenshot(win, f"{SHOTS}/ui-07-tools.png")
+    # the switch we forced on goes back off for a matching pair...
+    check(t.m_reencode.get_active(), "differing clips force re-encode")
+    select("part a.mp4", "part a copy.mp4")
+    yield 0.4
+    check(not t.m_reencode.get_active() and t.m_reencode.get_sensitive(), "forced switch reset")
+    # ...but a choice the user made stays
+    t.m_reencode.set_active(True)
+    select("part a.mp4", "part 'b'.mp4")
+    yield 0.3
+    select("part a.mp4", "part a copy.mp4")
+    yield 0.3
+    check(t.m_reencode.get_active(), "user's re-encode choice was undone")
+    t.m_reencode.set_active(False)
+    select("part a.mp4", "part 'b'.mp4")
+    yield 0.4
+    t._move(t._ready_order()[1], -1)
     t.m_go.emit("activated")
     t.s_time.set_text("0:01")
     t.s_go.emit("activated")

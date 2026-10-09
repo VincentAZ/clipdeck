@@ -144,7 +144,8 @@ def count_frames(path: str, cancel: threading.Event | None = None) -> int:
         info = probe(path)
     except ProbeError:
         return -1
-    if info.nb_frames and info.container in ("mp4", "mov", "m4v"):
+    # the container count includes frames an edit list hides, so count those for real
+    if info.nb_frames and info.container in ("mp4", "mov", "m4v") and not info.preroll:
         return info.nb_frames
     rc, out = _capture(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
                         "-show_entries", "stream=nb_read_frames",
@@ -356,6 +357,11 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
             res.failures = [f"source no longer exists: {os.path.basename(g)} (moved, renamed "
                             "or sent to the Trash after this job was queued)" for g in gone]
             return finish(False)
+        changed = [i.path for i in plan.inputs if _changed(i)]
+        if changed:
+            res.failures = [f"source changed since this job was planned: {os.path.basename(c)} "
+                            "(e.g. replaced by a Quick Fix); add the job again" for c in changed]
+            return finish(False)
         os.makedirs(os.path.dirname(plan.output) or ".", exist_ok=True)
         for p, content in plan.files.items():
             with open(p, "w", encoding="utf-8") as fh:
@@ -414,6 +420,16 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
         _remove(tmp)
         res.failures = [f"{type(e).__name__}: {e}"]
         return finish(False)
+
+
+def _changed(info) -> bool:
+    if not info.mtime_ns:
+        return False
+    try:
+        st = os.stat(info.path)
+    except OSError:
+        return True
+    return st.st_mtime_ns != info.mtime_ns or st.st_size != info.size
 
 
 def _remove(p: str):

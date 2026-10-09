@@ -747,6 +747,102 @@ class ReviewRegressionTests(Base):
         q.shutdown()
 
 
+class SecondReviewTests(Base):
+    """One test per bug found in the second independent review."""
+
+    def test_01_speed_on_coarse_time_bases(self):
+        for name, speed in (("h264.avi", 2.0), ("xvid.avi", 1.5), ("ts30.mp4", 2.0),
+                            ("h264.avi", 1.25)):
+            res = self.run_plan(self.build(name, speed=speed))
+            self.assertAlmostEqual(probe(res.output).duration,
+                                   probe(src(name)).duration / speed, delta=0.25)
+
+    def test_02_preroll_sources(self):
+        i = probe(src("fasttrim.mp4"))
+        self.assertTrue(i.preroll)
+        for kw in (dict(fmt="mp4", vcodec="h264"), dict(fmt="webm"), dict(fmt="mkv")):
+            res = self.run_plan(self.build("fasttrim.mp4", **kw))
+            self.assertAlmostEqual(probe(res.output).duration, i.duration, delta=0.3)
+        with self.assertRaises(PlanError):
+            self.build("fasttrim.mp4", fmt="mkv", vcodec="copy")
+        with self.assertRaises(PlanError):
+            self.build("fasttrim.mp4", fmt="mkv", vcodec="h264", acodec="copy")
+
+    def test_03_avi_explicit_copy_to_mp4_refused(self):
+        with self.assertRaisesRegex(PlanError, "AVI"):
+            self.build("h264.avi", fmt="mp4", vcodec="copy")
+        self.run_plan(self.build("xvid.avi", fmt="mkv", vcodec="copy"))
+
+    def test_04_hdr_with_only_transfer_tagged(self):
+        for kw in (dict(fmt="gif"), dict(fmt="mp4", vcodec="h264")):
+            res = self.run_plan(self.build("hdr_trc_only.mp4", **kw))
+        self.assertEqual(probe(res.output).color_transfer, "bt709")
+
+    def test_05_merge_hdr_with_sdr(self):
+        infos = [probe(src("hdr.mp4")), probe(src("upright.mp4"))]
+        res = self.run_plan(ops.build_merge(infos, Recipe(), out_dir=self.out, encoders=ENC))
+        self.assertEqual(probe(res.output).color_transfer, "bt709")
+
+    def test_06_lossless_rotate_with_target_refused(self):
+        with self.assertRaises(PlanError):
+            self.build("long.mp4", rotate_lossless=True, rotate=90, target_mb=1)
+
+    def test_07_target_size_counts_every_audio_track(self):
+        res = self.run_plan(self.build("two20.mkv", fmt="mp4", target_mb=3), thorough=False)
+        self.assertEqual(res.warnings, [])
+        self.assertLessEqual(os.path.getsize(res.output), 3 * 1024 * 1024 * 1.05)
+
+    def test_08_extract_first_track_ignores_others(self):
+        res = self.run_plan(self.build("aac_ac3.mkv", fmt="m4a", acodec="copy"))
+        self.assertEqual(probe(res.output).acodec, "aac")
+
+    def test_09_stale_plan_after_replace(self):
+        work = os.path.join(self.out, "s")
+        os.makedirs(work)
+        shutil.copy(src("phone.mp4"), work)
+        info = probe(os.path.join(work, "phone.mp4"))
+        later = ops.build(info, Recipe(fmt="mkv", bake_rotation=False), out_dir=work)
+        time.sleep(0.01)
+        with open(info.path, "ab") as f:          # the file is replaced/modified meanwhile
+            f.write(b"\0")
+        res = runner.execute(later, threading.Event(), lambda f, t: None)
+        self.assertFalse(res.ok)
+        self.assertIn("changed", res.failures[0])
+        self.assertFalse(any(".BAD." in n for n in os.listdir(work)))
+
+    def test_10_constant_rate_stays_constant(self):
+        res = self.run_plan(self.build("ntsc.mkv", fmt="mov", vcodec="prores"))
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=avg_frame_rate", "-of", "csv=p=0", res.output],
+                           capture_output=True, text=True).stdout.strip()
+        self.assertEqual(r, "30000/1001")
+
+    def test_11_cover_art_does_not_become_video(self):
+        i = probe(src("cover.mkv"))
+        self.assertTrue(i.has_cover)
+        res = self.run_plan(self.build("cover.mkv", fmt="mkv", bake_rotation=False))
+        n = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+                            "stream=index", "-of", "csv=p=0", res.output],
+                           capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(n), 1)
+        self.assertEqual(probe(res.output).subtitle_count, 1)
+
+    def test_12_avi_slow_motion_to_mkv(self):
+        res = self.run_plan(self.build("h264.avi", fmt="mkv", speed=0.5))
+        self.assertAlmostEqual(probe(res.output).duration, 6.0, delta=0.3)
+
+    def test_speed_with_explicit_fps(self):
+        res = self.run_plan(self.build("upright.mp4", speed=2.0, fps=30))
+        o = probe(res.output)
+        self.assertAlmostEqual(o.fps, 30, delta=0.01)
+        self.assertAlmostEqual(o.duration, 1.5, delta=0.15)
+
+    def test_summary_mentions_baking(self):
+        i = probe(src("phone.mp4"))
+        plan = ops.build(i, ops.autofix_recipe(i), out_dir=self.out)
+        self.assertTrue(any("upright" in s for s in plan.summary), plan.summary)
+
+
 class LeakTests(Base):
     def test_no_threads_left_behind(self):
         before = threading.active_count()
