@@ -24,6 +24,7 @@ class Job:
     status: str = "Waiting"
     result: Result | None = None
     cancel: threading.Event = field(default_factory=threading.Event)
+    after: "Job | None" = None      # do not start before this job has finished
 
     @property
     def finished(self) -> bool:
@@ -44,8 +45,8 @@ class JobQueue:
         self._reserved: set[str] = set()   # outputs claimed by queued/running jobs
 
     # ---------------------------------------------------------------- public
-    def submit(self, plan: Plan) -> Job:
-        job = Job(plan)
+    def submit(self, plan: Plan, after: Job | None = None) -> Job:
+        job = Job(plan, after=after)
         with self._cv:
             self.jobs.append(job)
             self._reserved.add(plan.output)
@@ -68,6 +69,7 @@ class JobQueue:
             else:
                 notify = False
             job.cancel.set()
+            self._cv.notify_all()   # jobs waiting on this one may start now
         if notify:
             self.on_change(job)
 
@@ -114,7 +116,7 @@ class JobQueue:
                     return None
                 if self._running < self._max:
                     for j in self.jobs:
-                        if j.state == QUEUED:
+                        if j.state == QUEUED and (j.after is None or j.after.finished):
                             j.state = RUNNING
                             j.status = "Starting"
                             self._running += 1

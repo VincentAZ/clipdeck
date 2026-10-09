@@ -213,7 +213,9 @@ def probe(path: str, timeout: float = 30) -> MediaInfo:
         raise ProbeError("ffprobe timed out")
     if res.returncode != 0:
         msg = (res.stderr or "").strip().splitlines()
-        raise ProbeError(msg[-1] if msg else "ffprobe failed")
+        text = msg[-1] if msg else "ffprobe failed"
+        text = text.removeprefix(path + ": ").removeprefix(os.path.abspath(path) + ": ")
+        raise ProbeError(text[:1].upper() + text[1:])
     try:
         data = json.loads(res.stdout or "{}")
     except json.JSONDecodeError:
