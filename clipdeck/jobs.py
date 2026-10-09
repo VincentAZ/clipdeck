@@ -4,6 +4,7 @@ UI-agnostic; the GTK layer marshals callbacks onto the main loop."""
 from __future__ import annotations
 
 import itertools
+import os
 import threading
 from dataclasses import dataclass, field
 from typing import Callable
@@ -92,13 +93,21 @@ class JobQueue:
         with self._cv:
             return sum(1 for j in self.jobs if not j.finished)
 
-    def shutdown(self, wait: float = 5.0):
+    def shutdown(self, wait: float = 8.0):
         with self._cv:
             self._closing = True
             self._cv.notify_all()
         self.cancel_all()
         for t in self._workers:
             t.join(wait)
+        # a worker that did not stop in time must not leave a hidden partial file behind
+        for j in self.jobs:
+            if not j.finished:
+                for f in [j.plan.temp, *j.plan.cleanup]:
+                    try:
+                        os.unlink(f)
+                    except OSError:
+                        pass
 
     # ---------------------------------------------------------------- workers
     def _ensure_workers(self):
@@ -109,23 +118,37 @@ class JobQueue:
             self._workers.append(t)
             t.start()
 
+    def _ready(self, job: Job) -> bool:
+        if job.after is not None and not job.after.finished:
+            return False
+        if job.plan.replace_original:
+            # the original goes to the Trash when this finishes: let every job queued
+            # earlier that reads the same file go first
+            srcs = {i.path for i in job.plan.inputs}
+            for other in self.jobs:
+                if other is job:
+                    break
+                if not other.finished and srcs & {i.path for i in other.plan.inputs}:
+                    return False
+        return True
+
     def _next(self) -> Job | None:
         with self._cv:
             while True:
                 if self._closing:
                     return None
+                if len(self._workers) > self._max:
+                    # pool shrank: this idle worker leaves
+                    self._workers = [t for t in self._workers
+                                     if t is not threading.current_thread()]
+                    return None
                 if self._running < self._max:
                     for j in self.jobs:
-                        if j.state == QUEUED and (j.after is None or j.after.finished):
+                        if j.state == QUEUED and self._ready(j):
                             j.state = RUNNING
                             j.status = "Starting"
                             self._running += 1
                             return j
-                if len(self._workers) > self._max and self._running >= self._max:
-                    # pool shrank: let this worker exit
-                    self._workers = [t for t in self._workers
-                                     if t is not threading.current_thread()]
-                    return None
                 self._cv.wait()
 
     def _loop(self):

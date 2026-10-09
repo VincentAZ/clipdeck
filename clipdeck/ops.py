@@ -155,8 +155,9 @@ class Expect:
     vcodec: str = ""
     width: int = 0
     height: int = 0
-    rotation: int = 0
+    rotation: int | None = 0          # None: do not check (flipped display matrices)
     acodec: str = ""                  # "" means no audio track expected
+    audio_tracks: list = field(default_factory=list)   # [(codec, rate, channels)] per track
     audio_count: int = 0
     sample_rate: int = 0
     channels: int = 0
@@ -230,6 +231,61 @@ def temp_for(final: str) -> str:
     d, name = os.path.split(final)
     stem, ext = os.path.splitext(name)
     return os.path.join(d, f".{stem}.clipdeck-partial{ext}")
+
+
+STANDARD_RATES = (23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 119.88, 120)
+
+
+def rate_expr(rate: float) -> str:
+    """fps filter argument; NTSC rates become exact fractions (29.97 -> 30000/1001)."""
+    for n in (24, 30, 48, 60, 120):
+        if abs(rate - n * 1000 / 1001) < 0.005:
+            return f"{n * 1000}/1001"
+    return f"{rate:.6g}"
+
+
+def snap_rate(fps: float) -> float:
+    """Nearest standard frame rate within 3%, for turning VFR into CFR."""
+    if fps <= 0:
+        return 30.0
+    best = min(STANDARD_RATES, key=lambda r: abs(r - fps))
+    return best if abs(best - fps) / fps < 0.03 else round(fps, 3)
+
+
+# containers that store H.264/HEVC as Annex B byte streams; copying to/from these
+# legitimately rewrites the packets, so bit-exact comparison does not apply
+ANNEXB_CONTAINERS = {"ts", "mts", "m2ts", "avi", "mpg", "mpeg", "vob", "h264", "264", "hevc",
+                     "265"}
+
+
+def same_framing(a: str, b: str) -> bool:
+    return (a in ANNEXB_CONTAINERS) == (b in ANNEXB_CONTAINERS)
+
+
+def has_preroll(path: str) -> bool:
+    """True when the first packets have negative timestamps (an edit list hides frames
+    before the start, as left by keyframe trims). Such clips cannot be concatenated
+    losslessly: the concat demuxer would expose the hidden frames."""
+    try:
+        # video only: AAC audio always starts slightly negative (encoder priming)
+        res = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                              "-read_intervals", "%+#5",
+                              "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    for line in res.stdout.split():
+        try:
+            if float(line.strip(",")) < -0.001:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+HDR_TONEMAP = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+               "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+SDR_TAGS = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
 
 
 def _color_args(info: MediaInfo) -> list[str]:
@@ -369,14 +425,23 @@ def available_encoders() -> set[str]:
 # ----------------------------------------------------------------------------- geometry
 
 
-def _geometry(info: MediaInfo, r: Recipe, need_even: bool) -> tuple[list[str], int, int]:
+def _geometry(info: MediaInfo, r: Recipe, need_even: bool, upright: bool = True
+              ) -> tuple[list[str], int, int]:
     """Video filter chain (excluding fps/speed) and the resulting stored size.
-    Works in upright, square-pixel coordinates: ffmpeg autorotates before our filters."""
+    Works in upright, square-pixel coordinates: ffmpeg autorotates before our filters.
+    upright=False keeps the stored orientation (autorotation off, flag preserved)."""
     vf: list[str] = []
+    # all sizes are computed in displayed orientation; when the rotation flag is kept
+    # (upright=False) the pixels stay sideways, so filters get swapped dimensions
+    sideways = not upright and info.rotation in (90, -90)
+
+    def dims(a, b):
+        return (b, a) if sideways else (a, b)
     w, h = info.display_size
     if info.sar != 1:
         # normalize to square pixels first so every later number means what it says
-        vf.append(f"scale={even(w)}:{even(h)}:flags=lanczos,setsar=1")
+        sw, sh = dims(even(w), even(h))
+        vf.append(f"scale={sw}:{sh}:flags=lanczos,setsar=1")
         w, h = even(w), even(h)
     if r.deinterlace:
         vf.append("bwdif=mode=send_frame")
@@ -417,13 +482,16 @@ def _geometry(info: MediaInfo, r: Recipe, need_even: bool) -> tuple[list[str], i
     else:
         tw, th = max(1, int(round(tw))), max(1, int(round(th)))
     if (tw, th) != (w, h):
-        vf.append(f"scale={tw}:{th}:flags=lanczos,setsar=1")
-    return vf, tw, th
+        sw, sh = dims(tw, th)
+        vf.append(f"scale={sw}:{sh}:flags=lanczos,setsar=1")
+    return (vf, *dims(tw, th))
 
 
 def _out_duration(info: MediaInfo, r: Recipe) -> tuple[float, float]:
     """(start, input span) after trimming, and validates the trim."""
     start = r.trim_start or 0.0
+    if not info.duration and r.trim_end is None:
+        raise PlanError(f"The length of {info.name} cannot be determined")
     end = r.trim_end if r.trim_end is not None else info.duration
     if start < 0 or end < 0:
         raise PlanError("Trim times cannot be negative")
@@ -436,25 +504,31 @@ def _out_duration(info: MediaInfo, r: Recipe) -> tuple[float, float]:
     return start, end - start
 
 
-def _audio_codec_args(acodec: str, r: Recipe, src_rate: int, src_ch: int
-                      ) -> tuple[list[str], int, int]:
-    args = ["-c:a", ACODEC_ENCODER[acodec]]
+def _track_format(acodec: str, src_rate: int, src_ch: int) -> tuple[int, int]:
+    """Sample rate and channel count an encoder will use for one source track."""
     rate = src_rate or 48000
     ch = src_ch or 2
+    if acodec == "opus":
+        rate, ch = 48000, min(ch, 8)
+    elif acodec == "mp3":
+        rate, ch = min(rate, 48000), min(ch, 2)
+    elif acodec == "aac":
+        rate = min(rate, 96000)
+    return rate, ch
+
+
+def _audio_codec_args(acodec: str, r: Recipe, tracks) -> tuple[list[str], list[tuple]]:
+    """Encoder flags with per-track rate/channels, so a mono commentary track stays mono
+    and a 5.1 track stays 5.1. Returns (args, [(codec, rate, ch)] per track)."""
+    args = ["-c:a", ACODEC_ENCODER[acodec]]
     if acodec in LOSSY_AUDIO:
         args += ["-b:a", f"{int(r.audio_kbps)}k"]
-    if acodec == "opus":
-        rate = 48000
-        ch = min(ch, 8)
-    elif acodec == "mp3":
-        if rate > 48000:
-            rate = 48000
-        ch = min(ch, 2)
-    elif acodec == "aac":
-        if rate > 96000:
-            rate = 96000
-    args += ["-ar", str(rate), "-ac", str(ch)]
-    return args, rate, ch
+    expect = []
+    for n, t in enumerate(tracks):
+        rate, ch = _track_format(acodec, t.sample_rate, t.channels)
+        args += [f"-ar:a:{n}", str(rate), f"-ac:a:{n}", str(ch)]
+        expect.append((ACODEC_NAME[acodec], rate, ch))
+    return args, expect
 
 
 # ----------------------------------------------------------------------------- builders
@@ -477,6 +551,8 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
         raise PlanError(f"{info.name} has no audio track to extract")
     if r.rotate % 90 or r.rotate % 360 not in ROTATIONS:
         raise PlanError("Rotation must be 0, 90, 180 or 270 degrees")
+    if fmt.kind in ("video", "gif") and info.is_image_seq:
+        raise PlanError(f"{info.name} is a still image, not a video")
     if fmt.kind == "gif":
         return _build_gif(info, r, out_dir, taken, title)
 
@@ -511,6 +587,10 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
         else:
             if r.bake_rotation and info.rotation:
                 needs_pixels = True
+            if not r.bake_rotation and info.rotation and (r.crop or r.rotate or r.hflip
+                                                          or r.vflip):
+                raise PlanError("Turn on “Make upright” to crop, rotate or flip a clip that "
+                                "has a rotation flag")
             if want_v == "copy":
                 if needs_pixels:
                     reasons = []
@@ -528,11 +608,17 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
                     raise PlanError(f"{info.vcodec} video cannot be copied into {fmt.label}")
                 vmode = "copy"
             elif want_v == "auto":
-                vmode = "copy" if (copy_ok_codec and not needs_pixels) else "encode"
+                # AVI has no real timestamps: copied B-frame video ends up with
+                # out-of-order timestamps in any modern container, so re-encode it
+                vmode = "copy" if (copy_ok_codec and not needs_pixels
+                                   and info.container != "avi") else "encode"
             else:
                 vmode = "encode"
         if vmode == "encode":
             choice = fmt.vcodecs[0] if want_v in ("auto", "copy") else want_v
+            if r.target_mb > 0 and choice in ("prores", "dnxhr"):
+                raise PlanError("ProRes and DNxHR have fixed bitrates; a target file size "
+                                "needs H.264, HEVC, AV1 or VP9")
             venc = resolve_encoder(choice, r.gpu and choice in ("h264", "hevc", "av1"), encoders)
             vcodec_name = VCODEC_NAME[choice]
         else:
@@ -549,14 +635,20 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
         if want_a not in ("auto", "copy") and want_a not in fmt.acodecs:
             raise PlanError(f"{ACODEC_LABELS.get(want_a, want_a)} audio cannot go in {fmt.label}")
         acopy_ok = ("*" in fmt.copy_a or all(a.codec in fmt.copy_a for a in info.audio))
+        # copied audio can only start on a packet boundary near the keyframe, so an
+        # exact cut needs re-encoded audio (MP4 hides the excess, MKV/WebM play it)
+        exact_cut = r.trimmed() and r.trim_exact and vmode != "copy"
         if want_a == "copy":
             if r.has_audio_filters():
                 raise PlanError("Copying audio is impossible with speed or volume changes")
+            if exact_cut:
+                raise PlanError("Copying audio is impossible with a frame-accurate trim")
             if not acopy_ok:
                 raise PlanError(f"{info.acodec} audio cannot be copied into {fmt.label}")
             amode = "copy"
         elif want_a == "auto":
-            amode = "copy" if acopy_ok and not r.has_audio_filters() else "encode"
+            amode = "copy" if (acopy_ok and not r.has_audio_filters()
+                               and not exact_cut) else "encode"
         else:
             amode = "encode"
         if amode == "encode":
@@ -577,6 +669,14 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
             argv += ["-display_hflip:v:0"]
         if r.vflip:
             argv += ["-display_vflip:v:0"]
+    if info.container == "avi" and vmode == "copy":
+        # copied AVI B-frame video has no timestamps; (when re-encoding, genpts would
+        # create a duplicate timestamp and lose a frame, so only here)
+        argv += ["-fflags", "+genpts"]
+    keep_flag = (fmt.kind == "video" and vmode == "encode" and not r.bake_rotation
+                 and bool(info.rotation))
+    if keep_flag:
+        argv += ["-noautorotate"]
     if start:
         argv += ["-ss", f"{start:.6f}"]
     if r.trim_end is not None or start:
@@ -584,30 +684,56 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
     argv += ["-i", info.path]
 
     expect = Expect(kind=fmt.kind, duration=out_dur)
+    if info.is_vfr:
+        # VFR sources often report a duration that stops short of their last frame
+        expect.dur_tol = max(expect.dur_tol, 0.15 + 3.0 / max(info.fps, 1.0))
     summary: list[str] = []
 
     if fmt.kind == "video":
-        argv += ["-map", "0:v:0"]
-        if keep_audio:
-            argv += ["-map", "0:a"]
-        argv += ["-sn", "-dn"]
+        remux_all = (fmt.key == "mkv" and info.container in ("mkv", "webm") and vmode == "copy"
+                     and amode in ("copy", "none") and keep_audio == info.has_audio)
+        if remux_all:
+            # Matroska to Matroska: keep subtitles, extra tracks and attachments too
+            argv += ["-map", "0", "-map", "-0:d?", "-c:s", "copy", "-c:t", "copy"]
+            if info.subtitle_count:
+                summary.append(f"{info.subtitle_count} subtitle track(s) kept")
+        else:
+            argv += ["-map", "0:v:0"]
+            if keep_audio:
+                argv += ["-map", "0:a"]
+            argv += ["-sn", "-dn"]
+            if info.subtitle_count:
+                summary.append(f"{info.subtitle_count} subtitle track(s) dropped")
         need_even = vmode == "encode" and venc not in ("prores_ks",)
         if vmode == "encode":
-            vf, ow, oh = _geometry(info, r, need_even)
-            rate = r.fps or (info.fps if r.cfr else 0)
+            vf, ow, oh = _geometry(info, r, need_even, upright=not keep_flag)
+            if venc == "dnxhd" and (ow < 256 or oh < 120):
+                raise PlanError(f"DNxHR needs at least 256×120; this output would be {ow}×{oh}")
+            tonemap = info.is_hdr and (venc in ("libx264", "h264_nvenc", "libvpx-vp9", "dnxhd")
+                                       or info.bit_depth <= 8)
+            if tonemap:
+                vf.append(HDR_TONEMAP)
+                summary.append("HDR tone-mapped to SDR (this codec is 8-bit)")
+            rate = r.fps or (snap_rate(info.fps) if r.cfr else 0)
             if rate:
-                vf.append(f"fps={rate:.6g}")
+                vf.append(f"fps={rate_expr(rate)}")
             if r.speed != 1.0:
                 vf.append(f"setpts=PTS/{r.speed:.6g}")
             if vf:
                 argv += ["-vf", ",".join(vf)]
             if rate:
                 argv += ["-fps_mode", "cfr"]
-                # frame-rate conversion snaps the end to the new frame grid, and VFR
-                # sources often report a duration that stops short of their last frame
+                # frame-rate conversion snaps the end to the new frame grid
                 expect.dur_tol = max(expect.dur_tol, 0.15 + 3.0 / rate)
+            else:
+                # keep every frame with its original timestamp; some muxers (MOV) would
+                # otherwise default to constant rate and silently drop/duplicate frames
+                # (and encode in the source's own time base so no two timestamps collide)
+                argv += ["-fps_mode", "passthrough", "-enc_time_base:v", "demux"]
             expect.width, expect.height = ow, oh
-            expect.rotation = 0
+            expect.rotation = info.rotation if keep_flag else 0
+            if keep_flag:
+                summary.append(f"Keeps the {abs(info.rotation)}° rotation flag (not made upright)")
             summary.append(f"Video: {info.vcodec} → {VCODEC_LABELS[_key_for(venc)]}"
                            f"{' (GPU)' if venc.endswith('_nvenc') else ''}, {ow}×{oh}")
         else:
@@ -616,7 +742,9 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
                 argv += ["-tag:v", "hvc1"]
             expect.width, expect.height = info.width, info.height
             expect.rotation = info.rotation if lossless_rot is None else lossless_rot
-            if not r.trimmed():
+            if lossless_rot is not None and (r.hflip or r.vflip):
+                expect.rotation = None   # ffprobe reports flipped matrices oddly
+            if not r.trimmed() and same_framing(info.container, fmt.ext):
                 expect.video_md5_from = info.path
             summary.append(f"Video: {info.vcodec} copied (lossless), {info.width}×{info.height}")
             if lossless_rot is not None:
@@ -626,15 +754,16 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
                 summary.append(f"Keeps the {abs(info.rotation)}° rotation flag")
         expect.vcodec = vcodec_name
         if r.trimmed() and vmode == "copy":
-            # stream copy can only cut on keyframes, so the start moves earlier
-            expect.dur_tol = max(0.5, span * 0.5)
+            # stream copy can only cut on keyframes, so the start moves back to the
+            # previous keyframe, which can be anywhere since the beginning of the file
+            expect.dur_tol = start + 0.5
             expect.min_duration = span - 0.25
             summary.append("Fast trim: cuts on the nearest keyframe (may start a bit early)")
         frame_preserving = (not r.trimmed() and not r.fps and not r.cfr and r.speed == 1.0)
         if frame_preserving:
             expect.frames_from = info.path
         if vmode == "encode":
-            argv += _color_args(info)
+            argv += SDR_TAGS if tonemap else _color_args(info)
     else:
         argv += ["-map", "0:a:0", "-vn", "-sn", "-dn"]
 
@@ -647,25 +776,23 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
             af.append(f"volume={r.volume_db:.6g}dB")
         if r.normalize_audio:
             af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+        tracks = info.audio[:1] if fmt.kind == "audio" else info.audio
         if amode == "copy":
             argv += ["-c:a", "copy"]
             expect.acodec = info.acodec
-            expect.sample_rate = info.audio[0].sample_rate
-            expect.channels = info.audio[0].channels
+            expect.audio_tracks = [(t.codec, t.sample_rate, t.channels) for t in tracks]
             if not r.trimmed():
                 expect.audio_md5_from = info.path
             summary.append(f"Audio: {info.acodec} copied (bit-identical)")
         else:
             if af:
                 argv += ["-af", ",".join(af)]
-            aargs, rate, ch = _audio_codec_args(acodec_key, r, info.audio[0].sample_rate,
-                                                info.audio[0].channels)
+            aargs, expect.audio_tracks = _audio_codec_args(acodec_key, r, tracks)
             argv += aargs
             expect.acodec = ACODEC_NAME[acodec_key]
-            expect.sample_rate, expect.channels = rate, ch
             expect.dur_tol = max(expect.dur_tol, 0.35)
             summary.append(f"Audio: {info.acodec} → {ACODEC_LABELS[acodec_key]}")
-        expect.audio_count = 1 if fmt.kind == "audio" else len(info.audio)
+        expect.audio_count = len(tracks)
     elif fmt.kind == "video":
         argv += ["-an"]
         summary.append("Audio: none" if not info.has_audio else "Audio: removed")
@@ -743,7 +870,7 @@ def _strip_audio(argv: list[str]) -> list[str]:
         if a == "-map" and i + 1 < len(argv) and argv[i + 1].startswith("0:a"):
             i += 2
             continue
-        if a in with_val - {"-map"}:
+        if a in with_val - {"-map"} or a.startswith(("-ar:a:", "-ac:a:")):
             i += 2
             continue
         if a == "-an":
@@ -759,13 +886,15 @@ def _build_gif(info: MediaInfo, r: Recipe, out_dir, taken, title) -> Plan:
     out_dur = span / r.speed
     gr = replace(r, scale_width=0, scale_height=0)
     vf, w, h = _geometry(info, gr, need_even=False)
+    if info.is_hdr:
+        vf.append(HDR_TONEMAP)
     if r.gif_width and r.gif_width < w:
         nh = max(1, int(round(h * r.gif_width / w)))
         vf.append(f"scale={r.gif_width}:{nh}:flags=lanczos")
         w, h = r.gif_width, nh
     rate = r.gif_fps if (r.gif_fps and (not info.fps or r.gif_fps < info.fps)) else 0
     if rate:
-        vf.append(f"fps={rate:.6g}")
+        vf.append(f"fps={rate_expr(rate)}")
     if r.speed != 1.0:
         vf.append(f"setpts=PTS/{r.speed:.6g}")
     chain = ",".join(vf) + "," if vf else ""
@@ -812,8 +941,13 @@ def autofix_recipe(info: MediaInfo, cfr: bool = False) -> Recipe | None:
     do_cfr = cfr and info.is_vfr
     if not (bake or to_mp4 or fix_v or fix_a or odd or do_cfr):
         return None
-    if info.container == "mov" and not (bake or fix_v or odd or do_cfr):
-        return None  # .mov is the edit delivery format; leave it alone
+    if info.container == "mov":
+        if not (bake or fix_v or odd or do_cfr):
+            return None  # .mov is the edit delivery format; leave it alone
+        # stay in MOV (PCM audio is copied, not squeezed into AAC)
+        return Recipe(fmt="mov", vcodec="h264", acodec="auto", quality="lossless",
+                      speed_preset="best", bake_rotation=True, cfr=do_cfr,
+                      suffix="_upright" if bake else "_compatible")
     if to_mp4:
         suffix = ""
     elif bake:
@@ -841,7 +975,11 @@ def can_concat_losslessly(infos: list[MediaInfo]) -> bool:
                 tuple((s.codec, s.sample_rate, s.channels) for s in i.audio))
     if not a.has_video or a.vcodec not in ("h264", "hevc"):
         return False
-    return all(sig(i) == sig(a) for i in infos[1:])
+    if any(s.codec not in ("aac", "mp3") for s in a.audio):
+        return False          # the joined file is MP4
+    if not all(sig(i) == sig(a) for i in infos[1:]):
+        return False
+    return not any(has_preroll(i.path) for i in infos)
 
 
 def _concat_escape(path: str) -> str:
@@ -871,8 +1009,6 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
         if first.vcodec == "hevc":
             argv += ["-tag:v", "hvc1"]
         argv += ["-movflags", "+faststart", tmp]
-        if not all(a.codec in ("aac", "mp3") for a in first.audio):
-            raise PlanError("Lossless merge needs AAC/MP3 audio; use “Re-encode” instead")
         expect = Expect(kind="video", vcodec=first.vcodec, width=first.width, height=first.height,
                         rotation=first.rotation, duration=total, dur_tol=0.1 * len(infos) + 0.3,
                         acodec=first.acodec if any_audio else "",
@@ -894,7 +1030,7 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
     if r.scale_height:
         w, h = w * r.scale_height / h, r.scale_height
     W, H = even(w), even(h)
-    F = r.fps or first.fps or 30
+    F = r.fps or snap_rate(first.fps or 30)
     if F > 240:
         F = 30
     argv = list(COMMON)
@@ -902,8 +1038,10 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
         argv += ["-i", i.path]
     parts, labels = [], []
     for n, i in enumerate(infos):
-        parts.append(f"[{n}:v:0]scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
-                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={F:.6g},format=yuv420p[v{n}]")
+        # square pixels first, so anamorphic clips keep their real shape
+        parts.append(f"[{n}:v:0]scale=trunc(iw*sar/2)*2:ih,setsar=1,"
+                     f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={rate_expr(F)},format=yuv420p[v{n}]")
         if any_audio:
             if i.has_audio:
                 parts.append(f"[{n}:a:0]aresample=48000,aformat=sample_fmts=fltp:"
@@ -945,8 +1083,12 @@ def build_snapshot(info: MediaInfo, at: float, ext: str = "png", out_dir: str | 
         raise PlanError(f"{info.name} has no video")
     if ext not in ("png", "jpg"):
         raise PlanError("Snapshot format must be png or jpg")
-    if at < 0 or (info.duration and at >= info.duration):
+    if at < 0 or (info.duration and at > info.duration):
         raise PlanError(f"Time {at:.2f}s is outside the clip (0 – {info.duration:.2f}s)")
+    if info.duration:
+        # the last frame starts one frame before the end; seeking past it yields nothing
+        last = info.duration - 1.5 / (info.fps or 25)
+        at = max(0.0, min(at, last))
     out = output_path(info, ext, f"_frame_{at:.2f}s".replace(".", "-"), out_dir, taken)
     tmp = temp_for(out)
     w, h = info.display_size

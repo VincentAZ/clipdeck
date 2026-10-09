@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Clipdeck
+GenericName=Video Fixer and Converter
+Comment=Fix sideways phone videos, convert, trim, rotate, crop and compress
+Exec=@BIN@ %F
+Icon=local.clipdeck.Clipdeck
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;GTK;GNOME;
+Keywords=video;rotate;convert;ffmpeg;mp4;mkv;gif;trim;compress;resolve;
+MimeType=video/mp4;video/quicktime;video/x-matroska;video/webm;video/x-msvideo;video/mpeg;video/3gpp;video/x-flv;video/x-ms-wmv;video/mp2t;image/gif;
+StartupNotify=true
+StartupWMClass=local.clipdeck.Clipdeck
+DBusActivatable=false

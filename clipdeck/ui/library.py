@@ -204,8 +204,9 @@ class MediaRow(Gtk.Box):
         self.spinner.set_visible(it.state == PROBING)
         self.picture.set_paintable(it.texture)
         self.placeholder.set_visible(it.texture is None and it.state != PROBING)
-        if it.info is not None and not it.info.has_video:
-            self.placeholder.set_from_icon_name("audio-x-generic-symbolic")
+        audio_only = it.info is not None and not it.info.has_video
+        self.placeholder.set_from_icon_name("audio-x-generic-symbolic" if audio_only
+                                            else "video-x-generic-symbolic")
         child = self.badges.get_first_child()
         while child:
             nxt = child.get_next_sibling()

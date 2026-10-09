@@ -4,7 +4,6 @@ no-clobber publish of the result."""
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import threading
 import time
@@ -109,26 +108,48 @@ def _quote(a: str) -> str:
 # ----------------------------------------------------------------------------- verification
 
 
-def _stream_md5(path: str, sel: str, timeout: float = 600) -> str:
-    res = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-map", sel,
-                          "-c", "copy", "-f", "md5", "-"],
-                         capture_output=True, text=True, timeout=timeout)
-    return res.stdout.strip().removeprefix("MD5=") if res.returncode == 0 else ""
+def _capture(argv: list[str], cancel: threading.Event | None) -> tuple[int, str]:
+    """Run a helper command to completion; stops promptly when cancel is set."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, text=True, errors="replace")
+    stop = threading.Event()
+
+    def watch():
+        while not stop.is_set():
+            if cancel is not None and cancel.wait(0.2):
+                _terminate(proc)
+                return
+            if cancel is None:
+                return
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        out, _ = proc.communicate()
+    finally:
+        stop.set()
+        _terminate(proc)
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+    return proc.returncode, out
 
 
-def count_frames(path: str, cancel: threading.Event | None = None, timeout: float = 3600) -> int:
-    """Exact frame count: container value when trustworthy, else decode and count."""
+def _stream_md5(path: str, sel: str, cancel: threading.Event | None = None) -> str:
+    rc, out = _capture(["ffmpeg", "-v", "error", "-nostdin", "-fflags", "+genpts", "-i", path,
+                        "-map", sel, "-c", "copy", "-f", "md5", "-"], cancel)
+    return out.strip().removeprefix("MD5=") if rc == 0 else ""
+
+
+def count_frames(path: str, cancel: threading.Event | None = None) -> int:
+    """Exact frame count: container value when trustworthy, else read and count."""
     try:
         info = probe(path)
     except ProbeError:
         return -1
     if info.nb_frames and info.container in ("mp4", "mov", "m4v"):
         return info.nb_frames
-    res = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
-                          "-show_entries", "stream=nb_read_frames",
-                          "-of", "default=noprint_wrappers=1:nokey=1", path],
-                         capture_output=True, text=True, timeout=timeout)
-    digits = "".join(c for c in res.stdout.split("\n")[0] if c.isdigit())
+    rc, out = _capture(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                        "-show_entries", "stream=nb_read_frames",
+                        "-of", "default=noprint_wrappers=1:nokey=1", path], cancel)
+    digits = "".join(c for c in out.split("\n")[0] if c.isdigit())
     return int(digits) if digits else -1
 
 
@@ -137,8 +158,11 @@ def full_decode(path: str, cancel: threading.Event, log: deque, duration: float,
     """Decode every frame; any decoder error fails. Returns (clean, video frames)."""
     errs: deque = deque(maxlen=50)
     frames = 0
+    # passthrough timestamps: otherwise the null muxer complains about VFR sources whose
+    # timestamps collide after rounding, which is not damage in the file
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-xerror", "-progress", "pipe:1",
-           "-nostats", "-i", path, "-map", "0:v:0?", "-map", "0:a?", "-f", "null", "-"]
+           "-nostats", "-i", path, "-map", "0:v:0?", "-map", "0:a?",
+           "-fps_mode", "passthrough", "-enc_time_base", "demux", "-f", "null", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, text=True, errors="replace", bufsize=1)
     t = threading.Thread(target=lambda: [errs.append(l.rstrip()) for l in proc.stderr], daemon=True)
@@ -203,7 +227,7 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
             fails.append(f"video codec {info.vcodec or 'none'} ≠ {ex.vcodec}")
         if (info.width, info.height) != (ex.width, ex.height):
             fails.append(f"size {info.width}×{info.height} ≠ {ex.width}×{ex.height}")
-        if info.rotation != ex.rotation:
+        if ex.rotation is not None and info.rotation != ex.rotation:
             fails.append(f"rotation flag {info.rotation}° ≠ {ex.rotation}°")
     elif info.has_video:
         fails.append("audio file unexpectedly contains video")
@@ -217,11 +241,14 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
                     fails.append(f"audio codec {info.acodec} ≠ {ex.acodec}")
                 if ex.audio_count and len(info.audio) != ex.audio_count:
                     fails.append(f"{len(info.audio)} audio tracks ≠ {ex.audio_count}")
-                a = info.audio[0]
-                if ex.sample_rate and a.sample_rate != ex.sample_rate:
-                    fails.append(f"sample rate {a.sample_rate} ≠ {ex.sample_rate}")
-                if ex.channels and a.channels != ex.channels:
-                    fails.append(f"{a.channels} channels ≠ {ex.channels}")
+                for n, (want, got) in enumerate(zip(ex.audio_tracks, info.audio), 1):
+                    codec, rate, ch = want
+                    if got.codec != codec:
+                        fails.append(f"track {n}: audio codec {got.codec} ≠ {codec}")
+                    if rate and got.sample_rate != rate:
+                        fails.append(f"track {n}: sample rate {got.sample_rate} ≠ {rate}")
+                    if ch and got.channels != ch:
+                        fails.append(f"track {n}: {got.channels} channels ≠ {ch}")
         elif info.has_audio:
             fails.append("unexpected audio track")
 
@@ -244,10 +271,10 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
     if cancel.is_set():
         raise Cancelled()
     if ex.video_md5_from:
-        if _stream_md5(ex.video_md5_from, "0:v:0") != _stream_md5(path, "0:v:0"):
+        if _stream_md5(ex.video_md5_from, "0:v:0", cancel) != _stream_md5(path, "0:v:0", cancel):
             fails.append("copied video is not bit-identical to the source")
     if ex.audio_md5_from:
-        if _stream_md5(ex.audio_md5_from, "0:a:0") != _stream_md5(path, "0:a:0"):
+        if _stream_md5(ex.audio_md5_from, "0:a:0", cancel) != _stream_md5(path, "0:a:0", cancel):
             fails.append("copied audio is not bit-identical to the source")
 
     if thorough and ex.kind in ("video", "gif", "audio"):
@@ -256,10 +283,10 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
             fails.append("decode errors in output (see log)")
         want = ex.frames
         if want is None and ex.frames_from:
-            want = count_frames(ex.frames_from)
+            want = count_frames(ex.frames_from, cancel)
         if want is not None and want > 0 and ex.kind != "audio":
-            got = count_frames(path) if info.container not in ("mp4", "mov", "m4v") else \
-                (info.nb_frames or decoded)
+            got = count_frames(path, cancel) if info.container not in ("mp4", "mov", "m4v") \
+                else (info.nb_frames or decoded)
             if got != want:
                 fails.append(f"{got} frames ≠ {want} in source")
     return fails, warns
@@ -279,11 +306,19 @@ def publish(tmp: str, final: str) -> str:
         except FileExistsError:
             target = unique_path(final)
         except OSError:
-            # filesystem without hard links (exFAT, some network mounts)
-            if os.path.exists(target):
+            # filesystem without hard links (exFAT, some network mounts): claim the name
+            # atomically with O_EXCL, then move our file over our own empty claim
+            try:
+                fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
                 target = unique_path(final)
                 continue
-            shutil.move(tmp, target)
+            os.close(fd)
+            try:
+                os.replace(tmp, target)
+            except OSError:
+                os.unlink(target)
+                raise
             return target
     raise OSError(f"could not find a free name for {final}")
 
@@ -316,6 +351,11 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
         return res
 
     try:
+        gone = [i.path for i in plan.inputs if not os.path.isfile(i.path)]
+        if gone:
+            res.failures = [f"source no longer exists: {os.path.basename(g)} (moved, renamed "
+                            "or sent to the Trash after this job was queued)" for g in gone]
+            return finish(False)
         os.makedirs(os.path.dirname(plan.output) or ".", exist_ok=True)
         for p, content in plan.files.items():
             with open(p, "w", encoding="utf-8") as fh:
@@ -343,10 +383,8 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
         if fails:
             res.failures = fails
             stem, ext = os.path.splitext(plan.output)
-            bad = unique_path(stem + ".BAD" + ext)
             try:
-                os.replace(tmp, bad)
-                res.output = bad
+                res.output = publish(tmp, stem + ".BAD" + ext)
             except OSError:
                 _remove(tmp)
             log.append("verification failed: " + "; ".join(fails))

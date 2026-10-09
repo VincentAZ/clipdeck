@@ -30,7 +30,7 @@ PRESETS: list[tuple[str, str, dict]] = [
     ("prores", "Editing master: ProRes 422 HQ MOV",
      dict(fmt="mov", vcodec="prores", acodec="pcm24")),
     ("web", "Web: WebM VP9 + Opus", dict(fmt="webm", vcodec="vp9", acodec="opus")),
-    ("remux", "Remux to MKV (lossless, keeps everything)",
+    ("remux", "Remux to MKV (lossless; MKV sources keep subtitles)",
      dict(fmt="mkv", vcodec="auto", acodec="auto", bake_rotation=False)),
     ("gif", "Animated GIF", dict(fmt="gif")),
     ("mp3", "Audio: MP3", dict(fmt="mp3", acodec="mp3", audio_kbps=192)),
@@ -40,9 +40,9 @@ PRESETS: list[tuple[str, str, dict]] = [
 RESIZE = [("0", "Original size"), ("2160", "2160p (4K)"), ("1440", "1440p"),
           ("1080", "1080p"), ("720", "720p"), ("480", "480p"), ("360", "360p"),
           ("custom", "Custom width…")]
-FPS = [("0", "Original"), ("cfr", "Constant (source rate)"), ("23.976", "23.976"),
-       ("24", "24"), ("25", "25"), ("29.97", "29.97"), ("30", "30"), ("50", "50"),
-       ("60", "60")]
+FPS = [("0", "Original"), ("cfr", "Constant (nearest standard rate)"),
+       ("23.976", "23.976"), ("24", "24"), ("25", "25"), ("29.97", "29.97"), ("30", "30"),
+       ("50", "50"), ("59.94", "59.94"), ("60", "60")]
 SPEED = [("0.25", "0.25× (slow motion)"), ("0.5", "0.5×"), ("0.75", "0.75×"), ("1", "Normal"),
          ("1.25", "1.25×"), ("1.5", "1.5×"), ("2", "2×"), ("4", "4× (timelapse)")]
 GIF_FPS = [("0", "Source"), ("10", "10 fps"), ("12", "12 fps"), ("15", "15 fps"),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import tempfile
 
 from .media import MediaInfo
 
@@ -28,7 +29,8 @@ def thumbnail(info: MediaInfo, width: int = 256) -> str | None:
     if os.path.isfile(out) and os.path.getsize(out) > 0:
         return out
     os.makedirs(d, exist_ok=True)
-    tmp = out + f".{os.getpid()}.tmp.jpg"
+    fd, tmp = tempfile.mkstemp(prefix=key, suffix=".tmp.jpg", dir=d)   # unique per call
+    os.close(fd)
     at = min(1.0, info.duration * 0.1) if info.duration else 0
     for seek in (at, 0):
         try:

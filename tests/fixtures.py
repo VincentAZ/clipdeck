@@ -71,6 +71,55 @@ def media_dir() -> str:
     # long-ish clip for cancellation / progress
     run("-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=20", "-f", "lavfi", "-i", "sine=d=20",
         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", j("long.mp4"))
+    # ---- review regressions
+    # long GOP (one keyframe per 10 s), like many phone/screen recordings
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=12", "-f", "lavfi", "-i", "sine=d=12",
+        "-c:v", "libx264", "-g", "300", "-c:a", "aac", "-shortest", j("longgop.mp4"))
+    # keyframe-trimmed copy: edit list hides 5 s of pre-roll
+    run("-ss", "5", "-t", "2", "-i", j("longgop.mp4"), "-c", "copy", j("fasttrim.mp4"))
+    # stereo + mono audio tracks
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=2", "-f", "lavfi", "-i", "sine=d=2",
+        "-f", "lavfi", "-i", "sine=f=900:d=2", "-map", "0", "-map", "1", "-map", "2",
+        "-c:v", "libx264", "-c:a", "aac", "-ac:a:0", "2", "-ac:a:1", "1", "-shortest",
+        j("stereo_mono.mkv"))
+    # matroska with a subtitle track
+    with open(j("subs.srt"), "w") as f:
+        f.write("1\n00:00:00,000 --> 00:00:01,500\nHello\n")
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=2", "-i", j("subs.srt"),
+        "-c:v", "libx264", "-c:s", "srt", j("subs.mkv"))
+    # Xvid-style AVI with B-frames, and H.264 in AVI
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=3", "-f", "lavfi", "-i", "sine=d=3",
+        "-c:v", "mpeg4", "-bf", "2", "-c:a", "libmp3lame", "-shortest", j("xvid.avi"))
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=3", "-c:v", "libx264", j("h264.avi"))
+    # sideways MOV with PCM audio (an edit deliverable)
+    run("-i", j("stored.mp4"), "-c:v", "copy", "-c:a", "pcm_s24le", j("stored_pcm.mov"))
+    run("-display_rotation:v:0", "-90", "-i", j("stored_pcm.mov"), "-c", "copy", j("rot.mov"))
+    # live WebM with no duration in the header
+    live = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                           "testsrc2=s=320x180:r=30:d=3", "-f", "lavfi", "-i", "sine=d=3",
+                           "-c:v", "libvpx", "-c:a", "libopus", "-shortest", "-live", "1",
+                           "-f", "webm", "pipe:1"], capture_output=True, check=True).stdout
+    with open(j("live.webm"), "wb") as f:
+        f.write(live)
+    # two identical h264+opus mkvs
+    for n in ("o1.mkv", "o2.mkv"):
+        run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=1", "-f", "lavfi", "-i", "sine=d=1",
+            "-c:v", "libx264", "-c:a", "libopus", "-shortest", j(n))
+    # Pixel-style VFR: HEVC on a 90 kHz time base, 30 fps dropping to 24 fps mid-clip
+    # with jitter, stored sideways (reproduces the real-footage MOV frame drops)
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=4",
+        "-vf", "setpts='if(lt(N\\,60)\\,N/30\\,2+(N-60)/24)/TB+0.003*sin(N)/TB'",
+        "-fps_mode", "passthrough", "-video_track_timescale", "90000", "-c:v", "libx265",
+        "-x265-params", "log-level=none", "-tag:v", "hvc1", j("pixelvfr_stored.mp4"))
+    run("-display_rotation:v:0", "-90", "-i", j("pixelvfr_stored.mp4"), "-c", "copy",
+        j("jitter.mp4"))
+    # Pixel frame cadence: mostly 41.8 ms intervals with every 4th at 33.3 ms
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=6", "-frames:v", "140",
+        "-vf", "setpts='(N*0.0418-floor(N/4)*0.0085)/TB'", "-fps_mode", "passthrough",
+        "-video_track_timescale", "90000", "-c:v", "libx265", "-x265-params", "log-level=none",
+        "-tag:v", "hvc1", j("cadence.mp4"))
+    # a still image
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180", "-frames:v", "1", j("still.png"))
     # garbage that only pretends to be a video
     with open(j("fake.mp4"), "wb") as f:
         f.write(b"\x00" * 1000)

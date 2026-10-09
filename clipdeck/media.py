@@ -134,6 +134,8 @@ class MediaInfo:
     def is_vfr(self) -> bool:
         if not (self.fps and self.r_fps):
             return False
+        if self.is_interlaced and abs(self.r_fps - 2 * self.fps) / self.r_fps < 0.01:
+            return False      # field rate vs frame rate, not variable
         return abs(self.fps - self.r_fps) / self.r_fps > 0.01
 
     @property
@@ -176,9 +178,10 @@ def diagnose(info: MediaInfo) -> list[Issue]:
             "vcodec", f"{info.vcodec} video",
             "This video codec is poorly supported outside desktop players and is a "
             "common cause of green or garbled frames. It will be re-encoded to H.264."))
-    if info.has_audio and info.acodec not in FRIENDLY_ACODECS and info.container not in ("mov",):
+    odd_audio = [a.codec for a in info.audio if a.codec not in FRIENDLY_ACODECS]
+    if odd_audio and info.container != "mov":
         out.append(Issue(
-            "acodec", f"{info.acodec} audio",
+            "acodec", f"{odd_audio[0]} audio",
             "This audio codec is often silent or rejected in MP4 players. It will be "
             "converted to AAC."))
     if info.is_vfr:
@@ -196,8 +199,7 @@ def diagnose(info: MediaInfo) -> list[Issue]:
     if w % 2 or h % 2:
         out.append(Issue(
             "odd", "Odd dimensions",
-            f"{w}×{h} cannot be encoded to H.264 4:2:0 as-is; it will be padded to even.",
-            fixable=False))
+            f"{w}×{h} cannot be encoded to H.264 4:2:0 as-is; Quick Fix rounds it to even."))
     return out
 
 
@@ -276,9 +278,29 @@ def probe(path: str, timeout: float = 30) -> MediaInfo:
             info.subtitle_count += 1
     if not info.vcodec and not info.audio:
         raise ProbeError("No audio or video streams found")
-    if info.vcodec in ("png", "mjpeg") and info.duration == 0:
+    if not info.duration and not (info.vcodec in ("png", "mjpeg", "bmp", "webp", "tiff")
+                                  and len(streams) == 1):
+        # live/streamed recordings (OBS, browser MediaRecorder) carry no duration:
+        # measure it by reading the packets (fast, nothing is decoded)
+        info.duration = _scan_duration(path, timeout)
+    if info.vcodec in ("png", "mjpeg", "bmp", "webp", "tiff") and info.duration == 0:
         info.is_image_seq = True
     return info
+
+
+def _scan_duration(path: str, timeout: float) -> float:
+    try:
+        res = subprocess.run(["ffmpeg", "-v", "quiet", "-nostdin", "-i", path, "-map", "0",
+                              "-c", "copy", "-f", "null", "-progress", "pipe:1", "-"],
+                             capture_output=True, text=True, timeout=max(timeout, 120))
+    except (OSError, subprocess.TimeoutExpired):
+        return 0.0
+    us = [line.split("=", 1)[1] for line in res.stdout.splitlines()
+          if line.startswith("out_time_us=")]
+    try:
+        return max(0.0, int(us[-1]) / 1e6) if us else 0.0
+    except ValueError:
+        return 0.0
 
 
 def rotation_flag(path: str) -> int:

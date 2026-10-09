@@ -12,24 +12,6 @@ from .library import MediaItem
 from .widgets import button_row, clear_group, plain_row
 
 
-def describe(info, recipe: Recipe) -> str:
-    bits = []
-    if info.rotation:
-        bits.append(f"bake {abs(info.rotation)}° rotation")
-    if info.container not in ("mp4", "mov", "m4v"):
-        bits.append(f".{info.container} → .mp4")
-    if info.vcodec not in ("h264", "hevc", "av1"):
-        bits.append(f"{info.vcodec} → H.264")
-    if info.has_audio and any(a.codec not in ("aac", "mp3") for a in info.audio) \
-            and info.container != "mov":
-        bits.append(f"{info.acodec} → AAC")
-    if info.width % 2 or info.height % 2:
-        bits.append("even dimensions")
-    if recipe.cfr:
-        bits.append("constant frame rate")
-    return ", ".join(bits) if bits else "re-encode"
-
-
 def mov_recipe() -> Recipe:
     return Recipe(fmt="mov", vcodec="auto", acodec="auto", bake_rotation=True,
                   quality="lossless", speed_preset="best")
@@ -143,9 +125,7 @@ class FixPage(Gtk.Box):
             else:
                 lines = []
                 if fix:
-                    r = ops.autofix_recipe(it.info, cfr=self.cfr.get_active())
-                    what = describe(it.info, r)
-                    lines.append(f"{what[:1].upper()}{what[1:]} → {os.path.basename(fix.output)}")
+                    lines.append(f"→ {os.path.basename(fix.output)}: " + "; ".join(fix.summary))
                     jobs += 1
                 if mov:
                     lines.append(f"Resolve MOV → {os.path.basename(mov.output)}")

@@ -542,6 +542,211 @@ class SafetyTests(Base):
         self.assertTrue(fails)
 
 
+class ReviewRegressionTests(Base):
+    """One test per bug found in the independent review."""
+
+    def test_01_exact_trim_mkv_audio_is_cut_too(self):
+        res = self.run_plan(self.build("longgop.mp4", fmt="mkv", trim_start=1.3, trim_end=2.0))
+        self.assertAlmostEqual(probe(res.output).duration, 0.7, delta=0.15)
+
+    def test_01b_explicit_audio_copy_with_exact_trim_refused(self):
+        with self.assertRaises(PlanError):
+            self.build("longgop.mp4", fmt="mkv", trim_start=1.3, acodec="copy")
+
+    def test_02_fast_trim_long_gop_mkv(self):
+        self.run_plan(self.build("longgop.mp4", fmt="mkv", trim_start=5, trim_end=7,
+                                 trim_exact=False))
+
+    def test_03_lossless_flips(self):
+        for kw in (dict(rotate=0, hflip=True), dict(rotate=90, vflip=True)):
+            res = self.run_plan(self.build("upright.mp4", rotate_lossless=True, **kw))
+            want = "TR" if kw.get("hflip") else None
+            if want:
+                self.assertEqual(red_corner(res.output), want)
+
+    def test_04_live_webm_without_duration(self):
+        i = probe(src("live.webm"))
+        self.assertAlmostEqual(i.duration, 3.0, delta=0.2)
+        self.run_plan(ops.build(i, ops.autofix_recipe(i), out_dir=self.out, encoders=ENC))
+
+    def test_04b_still_image_rejected_clearly(self):
+        with self.assertRaisesRegex(PlanError, "still image"):
+            self.build("still.png", fmt="mp4")
+
+    def test_05_cancel_during_verification(self):
+        plan = self.build("long.mp4", fmt="mkv")      # copy: encoding is instant
+        cancel = threading.Event()
+
+        def progress(f, text):
+            if text == "Verifying":
+                cancel.set()
+        res = runner.execute(plan, cancel, progress)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.failures, ["cancelled"])
+        self.assertFalse(os.path.exists(plan.output))
+        self.assertFalse(os.path.exists(plan.temp))
+
+    def test_06_each_audio_track_keeps_its_channels(self):
+        res = self.run_plan(self.build("stereo_mono.mkv", fmt="mkv", volume_db=3))
+        self.assertEqual([a.channels for a in probe(res.output).audio], [2, 1])
+
+    def test_07_anamorphic_merge_fills_frame(self):
+        infos = [probe(src("anamorphic.mp4")), probe(src("part a.mp4"))]
+        res = self.run_plan(ops.build_merge(infos, Recipe(), out_dir=self.out, encoders=ENC,
+                                            force_reencode=True))
+        from tests.fixtures import frame
+        w, h, p = frame(res.output, 0.2)
+        self.assertEqual((w, h), (854, 480))
+        left = p[(240 * w + 10) * 3:(240 * w + 10) * 3 + 3]
+        self.assertGreater(sum(left), 60, "left edge is black: picture was squeezed")
+
+    def test_08_preroll_clips_not_joined_losslessly(self):
+        infos = [probe(src("fasttrim.mp4")), probe(src("fasttrim.mp4"))]
+        self.assertFalse(ops.can_concat_losslessly(infos))
+        res = self.run_plan(ops.build_merge(infos, Recipe(), out_dir=self.out, encoders=ENC))
+        self.assertAlmostEqual(probe(res.output).duration, 2 * infos[0].duration, delta=0.4)
+
+    def test_09_mkv_remux_keeps_subtitles(self):
+        res = self.run_plan(self.build("subs.mkv", fmt="mkv", bake_rotation=False))
+        self.assertEqual(probe(res.output).subtitle_count, 1)
+
+    def test_10_avi_bframes_copy(self):
+        self.run_plan(self.build("xvid.avi", fmt="mkv"))
+        i = probe(src("h264.avi"))
+        res = self.run_plan(ops.build(i, ops.autofix_recipe(i), out_dir=self.out, encoders=ENC))
+        self.assertEqual(probe(res.output).vcodec, "h264")
+
+    def test_11_sideways_mov_stays_mov_with_pcm(self):
+        i = probe(src("rot.mov"))
+        r = ops.autofix_recipe(i)
+        self.assertEqual(r.fmt, "mov")
+        res = self.run_plan(ops.build(i, r, out_dir=self.out, encoders=ENC))
+        o = probe(res.output)
+        self.assertEqual((o.container, o.acodec, o.rotation), ("mov", "pcm_s24le", 0))
+
+    def test_12_snapshot_at_the_very_end(self):
+        i = probe(src("part 'b'.mp4"))
+        for ext in ("png", "jpg"):
+            self.run_plan(ops.build_snapshot(i, i.duration - 0.01, ext, out_dir=self.out))
+
+    def test_13_dnxhr_too_small(self):
+        with self.assertRaisesRegex(PlanError, "256"):
+            self.build("upright.mp4", fmt="mov", vcodec="dnxhr", scale_height=90)
+
+    def test_14_vfr_into_other_containers(self):
+        for kw in (dict(fmt="mkv", vcodec="h264"), dict(fmt="webm"),
+                   dict(fmt="mov", vcodec="prores")):
+            self.run_plan(self.build("vfr.mp4", **kw), thorough=False)
+
+    def test_15_ntsc_rates_exact(self):
+        res = self.run_plan(self.build("upright.mp4", fps=29.97))
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=r_frame_rate", "-of", "csv=p=0", res.output],
+                           capture_output=True, text=True).stdout.strip()
+        self.assertEqual(r, "30000/1001")
+        self.assertEqual(ops.rate_expr(23.976), "24000/1001")
+        self.assertEqual(ops.snap_rate(29.79), 29.97)
+
+    def test_16_opus_mkvs_join_by_reencoding(self):
+        infos = [probe(src("o1.mkv")), probe(src("o2.mkv"))]
+        self.assertFalse(ops.can_concat_losslessly(infos))
+        self.run_plan(ops.build_merge(infos, Recipe(), out_dir=self.out, encoders=ENC))
+
+    def test_vfr_frames_preserved_in_every_container(self):
+        # found on real Pixel footage: MOV defaulted to constant rate and dropped frames,
+        # then a coarse encoder time base made two timestamps collide
+        # jitter.mp4 reproduces the drop (115 of 120 frames before the fix); its frames
+        # are microseconds apart, which only MP4/MOV time bases can represent
+        for kw in (dict(fmt="mov"), dict(fmt="mp4", vcodec="h264"), dict(fmt="mov", vcodec="hevc")):
+            self.run_plan(self.build("jitter.mp4", **kw))   # thorough: frame count + decode
+        for kw in (dict(fmt="mkv", vcodec="hevc"), dict(fmt="webm"), dict(fmt="mov")):
+            self.run_plan(self.build("cadence.mp4", **kw))
+
+    # ---- plausible concerns, now handled
+    def test_keep_rotation_flag_when_not_baking(self):
+        res = self.run_plan(self.build("phone.mp4", vcodec="h264", bake_rotation=False,
+                                       scale_height=160))
+        o = probe(res.output)
+        self.assertEqual((o.rotation, o.display_size), (-90, (284, 160)))
+
+    def test_no_bake_with_crop_refused(self):
+        with self.assertRaises(PlanError):
+            self.build("phone.mp4", bake_rotation=False, crop=(100, 100, 0, 0))
+
+    def test_hdr_tonemapped_for_h264(self):
+        res = self.run_plan(self.build("hdr.mp4", vcodec="h264"))
+        self.assertEqual(probe(res.output).color_transfer, "bt709")
+
+    def test_target_size_with_prores_refused(self):
+        with self.assertRaises(PlanError):
+            self.build("upright.mp4", fmt="mov", vcodec="prores", target_mb=5)
+
+    def test_publish_without_hardlinks(self):
+        tmp = os.path.join(self.out, "t.bin")
+        with open(tmp, "w") as f:
+            f.write("new")
+        final = os.path.join(self.out, "f.bin")
+        with open(final, "w") as f:
+            f.write("old")
+        real_link = os.link
+        os.link = lambda a, b: (_ for _ in ()).throw(OSError(1, "no links"))
+        try:
+            got = runner.publish(tmp, final)
+        finally:
+            os.link = real_link
+        self.assertEqual(open(final).read(), "old")
+        self.assertEqual(open(got).read(), "new")
+
+    def test_missing_source_fails_cleanly(self):
+        work = os.path.join(self.out, "m")
+        os.makedirs(work)
+        shutil.copy(src("upright.mp4"), work)
+        plan = ops.build(probe(os.path.join(work, "upright.mp4")), Recipe(scale_height=90))
+        os.unlink(os.path.join(work, "upright.mp4"))
+        res = runner.execute(plan, threading.Event(), lambda f, t: None)
+        self.assertFalse(res.ok)
+        self.assertIn("no longer exists", res.failures[0])
+
+    def test_replace_waits_for_earlier_readers(self):
+        work = os.path.join(self.out, "r")
+        os.makedirs(work)
+        shutil.copy(src("long.mp4"), work)
+        info = probe(os.path.join(work, "long.mp4"))
+        q = JobQueue(lambda j: None, workers=2)
+        reader = q.submit(ops.build(info, Recipe(vcodec="h264", scale_height=360)))
+        r = Recipe(vcodec="h264", scale_height=180, replace_original=True)
+        orig = runner.trash
+        runner.trash = lambda p: (os.rename(p, p + ".trashed"), True)[1]
+        try:
+            replacer = q.submit(ops.build(info, r, taken={reader.plan.output}))
+            deadline = time.time() + 120
+            while not (reader.finished and replacer.finished) and time.time() < deadline:
+                if replacer.state == "running":
+                    self.assertTrue(reader.finished, "replace job started before the reader")
+                time.sleep(0.05)
+        finally:
+            runner.trash = orig
+            q.shutdown()
+        self.assertEqual((reader.state, replacer.state), (DONE, DONE),
+                         (reader.result.failures, replacer.result.failures))
+
+    def test_interlaced_not_vfr(self):
+        i = probe(src("upright.mp4"))
+        i.field_order, i.fps, i.r_fps = "tt", 29.97, 59.94
+        self.assertFalse(i.is_vfr)
+
+    def test_queue_shrinks(self):
+        q = JobQueue(lambda j: None, workers=3)
+        q.submit(self.build("upright.mp4", scale_height=90))
+        time.sleep(0.3)
+        q.set_workers(1)
+        deadline = time.time() + 30
+        while len([t for t in q._workers if t.is_alive()]) > 1 and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertLessEqual(len([t for t in q._workers if t.is_alive()]), 1)
+        q.shutdown()
+
+
 class LeakTests(Base):
     def test_no_threads_left_behind(self):
         before = threading.active_count()

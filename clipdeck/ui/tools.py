@@ -20,6 +20,9 @@ class ToolsPage(Gtk.Box):
         self.items: list[MediaItem] = []
         self.order: list[MediaItem] = []
         self.merge_rows: list = []
+        self._forced = False
+        self._lossless_key: tuple = ()
+        self._lossless = False
 
         page = Adw.PreferencesPage(vexpand=True)
         self.append(page)
@@ -118,12 +121,20 @@ class ToolsPage(Gtk.Box):
             self.merge_list.add(row)
             self.merge_rows.append(row)
         self.merge_list.set_visible(bool(clips))
-        lossless = ops.can_concat_losslessly([i.info for i in clips])
+        key = tuple(i.path for i in clips)
+        if key != self._lossless_key:      # probing for pre-roll reads files: cache it
+            self._lossless_key = key
+            self._lossless = ops.can_concat_losslessly([i.info for i in clips])
+        lossless = self._lossless
         if len(clips) >= 2 and not lossless:
             self.m_reencode.set_active(True)
             self.m_reencode.set_sensitive(False)
             self.m_reencode.set_subtitle("Clips differ in format, so they must be re-encoded")
+            self._forced = True
         else:
+            if self._forced:               # undo a switch we flipped, not one the user did
+                self._forced = False
+                self.m_reencode.set_active(False)
             self.m_reencode.set_sensitive(len(clips) >= 2)
             self.m_reencode.set_subtitle(
                 "Clips match: off joins them losslessly in seconds" if lossless else
