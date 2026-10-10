@@ -3,7 +3,10 @@ no-clobber publish of the result."""
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -13,6 +16,81 @@ from typing import Callable
 
 from .media import ProbeError, probe
 from .ops import Plan, unique_path
+from .settings import config_dir
+
+# ----------------------------------------------------------------------------- children
+
+try:
+    _prctl = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True).prctl
+except (OSError, AttributeError):
+    _prctl = None
+_PR_SET_PDEATHSIG = 1
+
+
+def _die_with_parent():
+    """Runs in the forked child: ffmpeg gets SIGTERM if Clipdeck is killed, instead of
+    encoding on as an orphan. (The thread that started it waits for it, so its exit is
+    always the end of the job.)"""
+    if _prctl is not None:
+        _prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+
+
+def popen(argv, **kw) -> subprocess.Popen:
+    return subprocess.Popen(argv, preexec_fn=_die_with_parent, **kw)
+
+
+# ----------------------------------------------------------------------------- journal
+# Work files of running jobs are listed on disk, so a crash, power cut or kill -9 cannot
+# leave hidden partial files behind forever: the next start removes them.
+
+_journal_lock = threading.Lock()
+
+
+def _journal_path() -> str:
+    return os.path.join(config_dir(), "in-progress.txt")
+
+
+def _journal_read() -> list[str]:
+    try:
+        with open(_journal_path(), encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f if line.strip()]
+    except OSError:
+        return []
+
+
+def _journal_write(paths: list[str]):
+    try:
+        os.makedirs(config_dir(), exist_ok=True)
+        tmp = _journal_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(p + "\n" for p in paths)
+        os.replace(tmp, _journal_path())
+    except OSError:
+        pass
+
+
+def _journal(add: list[str] = (), remove: list[str] = ()):
+    with _journal_lock:
+        cur = [p for p in _journal_read() if p not in remove]
+        cur += [p for p in add if p not in cur]
+        _journal_write(cur)
+
+
+def clean_stale_partials() -> int:
+    """Remove work files left by a previous run that did not shut down cleanly. Only
+    Clipdeck's own temp names are ever touched. Call once, before any job starts."""
+    removed = 0
+    with _journal_lock:
+        for p in _journal_read():
+            base = os.path.basename(p)
+            if ".clipdeck-partial" in base or base.startswith("clipdeck-pass-"):
+                try:
+                    os.unlink(p)
+                    removed += 1
+                except OSError:
+                    pass
+        _journal_write([])
+    return removed
 
 
 class Cancelled(Exception):
@@ -48,8 +126,8 @@ def run_ffmpeg(argv: list[str], duration: float, on_progress: Callable[[float], 
     """Run one ffmpeg command, reporting the fraction of `duration` processed."""
     cmd = argv[:1] + ["-progress", "pipe:1", "-nostats"] + argv[1:]
     log.append("$ " + " ".join(_quote(a) for a in argv))
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            stdin=subprocess.DEVNULL, text=True, errors="replace", bufsize=1)
+    proc = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                 stdin=subprocess.DEVNULL, text=True, errors="replace", bufsize=1)
 
     def drain_err():
         for line in proc.stderr:
@@ -110,8 +188,8 @@ def _quote(a: str) -> str:
 
 def _capture(argv: list[str], cancel: threading.Event | None) -> tuple[int, str]:
     """Run a helper command to completion; stops promptly when cancel is set."""
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            stdin=subprocess.DEVNULL, text=True, errors="replace")
+    proc = popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                 stdin=subprocess.DEVNULL, text=True, errors="replace")
     stop = threading.Event()
 
     def watch():
@@ -164,8 +242,8 @@ def full_decode(path: str, cancel: threading.Event, log: deque, duration: float,
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-xerror", "-progress", "pipe:1",
            "-nostats", "-i", path, "-map", "0:v:0?", "-map", "0:a?",
            "-fps_mode", "passthrough", "-enc_time_base", "demux", "-f", "null", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            stdin=subprocess.DEVNULL, text=True, errors="replace", bufsize=1)
+    proc = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                 stdin=subprocess.DEVNULL, text=True, errors="replace", bufsize=1)
     t = threading.Thread(target=lambda: [errs.append(l.rstrip()) for l in proc.stderr], daemon=True)
     t.start()
     stop = threading.Event()
@@ -263,20 +341,23 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
             fails.append(f"duration {d:.3f}s ≠ {ex.duration:.3f}s (±{ex.dur_tol:.2f})")
 
     if ex.max_bytes and info.size > ex.max_bytes:
-        warns.append(f"file is {info.size / 1048576:.1f} MB, above the "
-                     f"{ex.max_bytes / 1048576 / 1.05:.1f} MB target")
+        warns.append(f"file is {info.size / 1048576:.2f} MB, above the "
+                     f"{ex.max_bytes / 1048576:.2f} MB target")
 
     if fails:
         return fails, warns
 
     if cancel.is_set():
         raise Cancelled()
-    if ex.video_md5_from:
-        if _stream_md5(ex.video_md5_from, "0:v:0", cancel) != _stream_md5(path, "0:v:0", cancel):
-            fails.append("copied video is not bit-identical to the source")
-    if ex.audio_md5_from:
-        if _stream_md5(ex.audio_md5_from, "0:a:0", cancel) != _stream_md5(path, "0:a:0", cancel):
-            fails.append("copied audio is not bit-identical to the source")
+    for src, sel, what in ((ex.video_md5_from, "0:v:0", "video"),
+                           (ex.audio_md5_from, "0:a:0", "audio")):
+        if not src:
+            continue
+        a, b = _stream_md5(src, sel, cancel), _stream_md5(path, sel, cancel)
+        if not a or not b:
+            fails.append(f"could not checksum the copied {what} to compare it with the source")
+        elif a != b:
+            fails.append(f"copied {what} is not bit-identical to the source")
 
     if thorough and ex.kind in ("video", "gif", "audio"):
         clean, decoded = full_decode(path, cancel, log, info.duration, on_progress)
@@ -285,9 +366,14 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
         want = ex.frames
         if want is None and ex.frames_from:
             want = count_frames(ex.frames_from, cancel)
+            if want < 0:
+                fails.append("could not count the source's frames to compare")
         if want is not None and want > 0 and ex.kind != "audio":
-            got = count_frames(path, cancel) if info.container not in ("mp4", "mov", "m4v") \
-                else (info.nb_frames or decoded)
+            # the MP4 frame count includes frames an edit list hides; count those for real
+            if info.container in ("mp4", "mov", "m4v") and not info.preroll:
+                got = info.nb_frames or decoded
+            else:
+                got = count_frames(path, cancel)
             if got != want:
                 fails.append(f"{got} frames ≠ {want} in source")
     return fails, warns
@@ -300,6 +386,8 @@ def publish(tmp: str, final: str) -> str:
     """Move tmp to final without ever overwriting an existing file. Returns the path used."""
     target = final
     for _ in range(1000):
+        if os.path.lexists(target):    # e.g. a dangling symlink: link() says EEXIST forever
+            target = unique_path(final)
         try:
             os.link(tmp, target)       # atomic, fails if target exists
             os.unlink(tmp)
@@ -324,13 +412,56 @@ def publish(tmp: str, final: str) -> str:
     raise OSError(f"could not find a free name for {final}")
 
 
-def trash(path: str) -> bool:
-    """Move to the desktop trash (recoverable). Never deletes outright."""
+def trash(path: str) -> str:
+    """Move to the desktop trash (recoverable). Never deletes outright.
+    Returns "" on success, else the reason it failed."""
     try:
-        res = subprocess.run(["gio", "trash", path], capture_output=True, timeout=30)
-        return res.returncode == 0 and not os.path.exists(path)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+        res = subprocess.run(["gio", "trash", path], capture_output=True, text=True,
+                             errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e)
+    if res.returncode == 0 and not os.path.lexists(path):
+        return ""
+    msg = (res.stderr or "").strip().splitlines()
+    reason = msg[-1] if msg else "gio trash failed"
+    return reason.removeprefix("gio: ").removeprefix(path + ": ")
+
+
+def _source_problem(plan: Plan, when: str) -> list[str]:
+    """Failures when an input vanished or changed (e.g. another job replaced it)."""
+    gone = [i.path for i in plan.inputs if not os.path.isfile(i.path)]
+    if gone:
+        return [f"source no longer exists: {os.path.basename(g)} (moved, renamed or sent to "
+                f"the Trash {when})" for g in gone]
+    changed = [i.path for i in plan.inputs if _changed(i)]
+    return [f"source changed {when}: {os.path.basename(c)} (e.g. replaced by a Quick Fix); "
+            "add the job again" for c in changed]
+
+
+def _ffmpeg_error(log: deque) -> str:
+    """The most useful line of ffmpeg's complaint, for the one-line failure text."""
+    for line in reversed(log):
+        if line.startswith("$ ") or not line.strip():
+            continue
+        low = line.lower()
+        if "conversion failed" in low or low.startswith("exiting"):
+            continue
+        return line.strip()[:200]
+    return ""
+
+
+def _with_bitrate(steps, old: int, new: int):
+    """The same steps with the video bitrate (and NVENC's peak/buffer) changed."""
+    out = []
+    for st in steps:
+        argv = list(st.argv)
+        for i in range(1, len(argv)):
+            if argv[i - 1] in ("-b:v", "-maxrate") and argv[i] == str(old):
+                argv[i] = str(new)
+            elif argv[i - 1] == "-bufsize" and argv[i] == str(2 * old):
+                argv[i] = str(2 * new)
+        out.append(type(st)(argv, st.label, st.duration, st.weight))
+    return out
 
 
 def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
@@ -339,53 +470,82 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
     log: deque = deque(maxlen=400)
     tmp = plan.temp
     res = Result(ok=False)
+    verified = False
+    work = [tmp, *plan.cleanup]
 
     def finish(ok: bool) -> Result:
         res.ok = ok
         res.log = "\n".join(log)
         res.elapsed = time.monotonic() - started
         for f in plan.cleanup:
-            try:
-                os.unlink(f)
-            except OSError:
-                pass
+            _remove(f)
+        _journal(remove=work)
         return res
 
+    def run_steps(steps, note: str = "") -> bool:
+        total_w = sum(s.weight for s in steps) or 1.0
+        done_w = 0.0
+        for step in steps:
+            problem = _source_problem(plan, "while this job was running")
+            if problem:
+                res.failures = problem
+                return False
+            base = done_w / total_w * (1 - verify_share)
+            span = step.weight / total_w * (1 - verify_share)
+            label = step.label + note
+            on_progress(base, label)
+            rc = run_ffmpeg(step.argv, step.duration,
+                            lambda f, b=base, s=span, l=label: on_progress(b + f * s, l),
+                            cancel, log)
+            if rc != 0:
+                why = _ffmpeg_error(log)
+                res.failures = [f"ffmpeg exited with code {rc}" + (f": {why}" if why else "")]
+                return False
+            done_w += step.weight
+        return True
+
     try:
-        gone = [i.path for i in plan.inputs if not os.path.isfile(i.path)]
-        if gone:
-            res.failures = [f"source no longer exists: {os.path.basename(g)} (moved, renamed "
-                            "or sent to the Trash after this job was queued)" for g in gone]
-            return finish(False)
-        changed = [i.path for i in plan.inputs if _changed(i)]
-        if changed:
-            res.failures = [f"source changed since this job was planned: {os.path.basename(c)} "
-                            "(e.g. replaced by a Quick Fix); add the job again" for c in changed]
+        problem = _source_problem(plan, "after this job was queued")
+        if problem:
+            res.failures = problem
             return finish(False)
         os.makedirs(os.path.dirname(plan.output) or ".", exist_ok=True)
+        _journal(add=work)
         for p, content in plan.files.items():
             with open(p, "w", encoding="utf-8") as fh:
                 fh.write(content)
         verify_share = 0.15 if thorough else 0.03
-        total_w = sum(s.weight for s in plan.steps) or 1.0
-        done_w = 0.0
-        for step in plan.steps:
-            base = done_w / total_w * (1 - verify_share)
-            span = step.weight / total_w * (1 - verify_share)
-            on_progress(base, step.label)
-            rc = run_ffmpeg(step.argv, step.duration,
-                            lambda f, b=base, s=span, l=step.label: on_progress(b + f * s, l),
-                            cancel, log)
-            if rc != 0:
-                res.failures.append(f"ffmpeg exited with code {rc}")
+        steps, vbit = plan.steps, plan.vbitrate
+        for attempt in range(3):
+            if not run_steps(steps, f" (smaller, try {attempt + 1})" if attempt else ""):
                 _remove(tmp)
                 return finish(False)
-            done_w += step.weight
+            size = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+            limit = plan.expect.max_bytes
+            dur = max((s.duration for s in steps), default=0.0)
+            if not (vbit and limit and size > limit and dur > 0 and attempt < 2):
+                break
+            # over the size target: take the excess out of the video bitrate and redo it
+            # (single-pass GPU encoders and very short clips overshoot by a few percent)
+            new = int(vbit - (size - limit * 0.985) * 8 / dur)
+            if new < 50_000:
+                break
+            log.append(f"output {size} bytes is over the {limit} byte target; "
+                       f"re-encoding at {new // 1000} kb/s")
+            steps, vbit = _with_bitrate(steps, vbit, new), new
+            _remove(tmp)
+        problem = _source_problem(plan, "while this job was running")
+        if problem:
+            res.failures = problem
+            _remove(tmp)
+            return finish(False)
         on_progress(1 - verify_share, "Verifying")
         fails, warns = verify(plan, tmp, thorough, cancel, log,
                               lambda f: on_progress(1 - verify_share + f * verify_share * 0.95,
                                                     "Verifying"))
         res.warnings = warns
+        if vbit != plan.vbitrate and not fails:
+            res.warnings.append(f"re-encoded at {vbit // 1000} kb/s to fit the size target")
         if fails:
             res.failures = fails
             stem, ext = os.path.splitext(plan.output)
@@ -395,21 +555,10 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
                 _remove(tmp)
             log.append("verification failed: " + "; ".join(fails))
             return finish(False)
+        verified = True
         res.output = publish(tmp, plan.output)
         if plan.replace_original and len(plan.inputs) == 1:
-            src = plan.inputs[0].path
-            if os.path.abspath(src) != os.path.abspath(res.output):
-                if trash(src):
-                    res.replaced_original = src
-                    if os.path.splitext(src)[1].lower() == os.path.splitext(res.output)[1].lower():
-                        # same container: the fixed file takes over the original name
-                        try:
-                            final = publish(res.output, src)
-                            res.output = final
-                        except OSError as e:
-                            res.warnings.append(f"could not rename to original name: {e}")
-                else:
-                    res.warnings.append("could not move the original to Trash; it was kept")
+            _replace_original(plan.inputs[0].path, res)
         on_progress(1.0, "Done")
         return finish(True)
     except Cancelled:
@@ -417,9 +566,36 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
         res.failures = ["cancelled"]
         return finish(False)
     except Exception as e:  # never let a worker thread die silently
-        _remove(tmp)
         res.failures = [f"{type(e).__name__}: {e}"]
+        if verified and os.path.isfile(tmp):
+            # the result is good; only saving it failed. Never throw verified work away
+            # (finish() only drops it from the journal, so the next start leaves it alone)
+            res.failures.append(f"the verified result was kept as {tmp}")
+            res.output = tmp
+        else:
+            _remove(tmp)
         return finish(False)
+
+
+def _replace_original(src: str, res: Result):
+    """Trash the original after its replacement verified. When the fixed file sits next
+    to it in the same format, the fixed file takes over the original's name; a file saved
+    to a separate output folder stays there."""
+    if os.path.abspath(src) == os.path.abspath(res.output):
+        return
+    same_dir = os.path.dirname(os.path.abspath(src)) == os.path.dirname(
+        os.path.abspath(res.output))
+    same_ext = os.path.splitext(src)[1].lower() == os.path.splitext(res.output)[1].lower()
+    why = trash(src)
+    if why:
+        res.warnings.append(f"could not move the original to the Trash ({why}); it was kept")
+        return
+    res.replaced_original = src
+    if same_dir and same_ext:
+        try:
+            res.output = publish(res.output, src)
+        except OSError as e:
+            res.warnings.append(f"could not rename to the original name: {e.strerror or e}")
 
 
 def _changed(info) -> bool:

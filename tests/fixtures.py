@@ -136,6 +136,27 @@ def media_dir() -> str:
         "-metadata:s:t", "filename=cover.jpg", "-map", "0", "-c", "copy", j("cover.mkv"))
     run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30000/1001:d=2", "-c:v", "mpeg4",
         j("ntsc.mkv"))
+    # ---- third review
+    # streams of different lengths (screen recorders): audio outlasts video and vice versa
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3", "-f", "lavfi", "-i", "sine=d=5",
+        "-c:v", "libx264", "-c:a", "aac", j("alonger.mp4"))
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=5", "-f", "lavfi", "-i", "sine=d=3",
+        "-c:v", "libx264", "-c:a", "aac", j("vlonger.mp4"))
+    # 2.1 and 4.0 audio (libopus rejects ffmpeg's default layouts for 3 and 4 channels)
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=2", "-f", "lavfi",
+        "-i", "sine=d=2,aformat=channel_layouts=2.1", "-c:v", "libx264", "-c:a", "pcm_s16le",
+        "-shortest", j("ch3.mkv"))
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=2", "-f", "lavfi",
+        "-i", "sine=d=2,aformat=channel_layouts=4.0", "-c:v", "libx264", "-c:a", "pcm_s16le",
+        "-shortest", j("ch4.mkv"))
+    # a sample rate neither AAC nor MP3 supports
+    run("-f", "lavfi", "-i", "sine=d=2:sample_rate=37800", "-c:a", "pcm_s16le", j("odd_rate.wav"))
+    # smaller than any NVENC encoder accepts
+    run("-f", "lavfi", "-i", "testsrc2=s=96x64:r=30:d=1", "-c:v", "libx264", j("tiny.mp4"))
+    # 20 s of 48 kHz stereo, for size targets with uncompressed audio
+    run("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=20", "-f", "lavfi",
+        "-i", "sine=d=20:sample_rate=48000", "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:a", "aac", "-ac", "2", "-shortest", j("st48.mp4"))
     # a still image
     run("-f", "lavfi", "-i", "testsrc2=s=320x180", "-frames:v", "1", j("still.png"))
     # garbage that only pretends to be a video

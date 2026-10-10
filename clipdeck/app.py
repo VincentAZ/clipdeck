@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 
 import gi
@@ -56,14 +57,31 @@ class ClipdeckApp(Adw.Application):
             if accels:
                 self.set_accels_for_action(f"app.{name}", accels)
         self.set_accels_for_action("win.open", ["<Ctrl>o"])
-        self.set_accels_for_action("win.remove-selected", ["Delete"])
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        # logout, `kill` or Ctrl+C in a terminal: stop jobs and remove partial files
+        # exactly like closing the window does
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self._on_signal)
+        # work files of a previous run that was killed outright (power cut, kill -9)
+        from .runner import clean_stale_partials
+        clean_stale_partials()
         provider = Gtk.CssProvider()
         provider.load_from_string(CSS)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def _on_signal(self):
+        if self.win is not None:
+            self.win._quit_now()
+        self.quit()
+        return GLib.SOURCE_REMOVE
+
+    def do_shutdown(self):
+        if self.win is not None and not self.win._closed:
+            self.win._shutdown()
+        Adw.Application.do_shutdown(self)
 
     def _window(self):
         if self.win is None:

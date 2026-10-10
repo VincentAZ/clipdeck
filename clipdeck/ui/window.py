@@ -32,9 +32,24 @@ class Context:
         self.encoders: set[str] = set(BASE_ENCODERS)
         self.queue: JobQueue = win.queue
         self.library: Library = win.library
+        self._warned_missing = False
 
     def taken(self) -> set[str]:
         return self.queue.reserved_outputs()
+
+    @property
+    def out_dir(self) -> str | None:
+        """Where outputs go. A chosen folder that has gone missing (an unplugged drive)
+        falls back to saving beside the originals, and the user is told once."""
+        s = self.settings
+        missing = s.output_mode == "folder" and s.output_folder and not s.out_dir
+        if missing and not self._warned_missing:
+            self._warned_missing = True
+            GLib.idle_add(lambda: self.toast(f"Output folder {s.output_folder} is missing: "
+                                             "saving next to the originals") and False)
+        elif not missing:
+            self._warned_missing = False
+        return s.out_dir
 
     def submit(self, plan: Plan, after: Job | None = None) -> Job:
         return self.queue.submit(plan, after=after)
@@ -59,7 +74,7 @@ class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app, settings: Settings):
         super().__init__(application=app, title="Clipdeck", default_width=1320,
                          default_height=860)
-        self.set_size_request(480, 480)
+        self.set_size_request(500, 480)
         self.settings = settings
         self._quit_confirmed = False
         self._announced: set[int] = set()
@@ -82,11 +97,18 @@ class MainWindow(Adw.ApplicationWindow):
 
         # only one breakpoint applies at a time (the last matching), so the narrow one
         # repeats the medium one's setters
-        for cond, collapse in (("max-width: 1100sp", False), ("max-width: 860sp", True)):
+        # (the sidebar plus Edit's two columns need about 1180 px side by side). Short
+        # windows get smaller players so the forms keep room.
+        for cond, collapse, short in (("max-width: 1200sp", False, False),
+                                      ("max-width: 860sp", True, False),
+                                      ("max-width: 1200sp and max-height: 720sp", False, True),
+                                      ("max-width: 860sp and max-height: 720sp", True, True)):
             bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse(cond))
             bp.add_setter(self.switcher, "visible", False)
             bp.add_setter(self.switcher_bar, "reveal", True)
-            bp.add_setter(self.edit.paned, "orientation", Gtk.Orientation.VERTICAL)
+            self.edit.narrow_setters(bp, short)
+            if short:
+                bp.add_setter(self.inspect.player.video, "height-request", 160)
             if collapse:
                 bp.add_setter(self.split, "collapsed", True)
             self.add_breakpoint(bp)
@@ -137,8 +159,15 @@ class MainWindow(Adw.ApplicationWindow):
         self.selection = Gtk.MultiSelection.new(self.library.store)
         self.selection.connect("selection-changed", lambda *_: self._selection_changed())
         self.selection.connect("items-changed", lambda *_: self._library_changed())
+        self._refresh_pending = 0
         self.listview = Gtk.ListView(model=self.selection, factory=factory)
         self.listview.add_css_class("navigation-sidebar")
+        # Delete removes clips only while the list has focus: as a window-wide shortcut it
+        # would fire before text fields see the key and empty the library while typing
+        keys = Gtk.ShortcutController()
+        keys.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string("Delete"),
+                                           Gtk.NamedAction.new("win.remove-selected")))
+        self.listview.add_controller(keys)
         self.side_stack.add_named(Gtk.ScrolledWindow(child=self.listview, vexpand=True,
                                                      hscrollbar_policy=Gtk.PolicyType.NEVER),
                                   "list")
@@ -151,6 +180,7 @@ class MainWindow(Adw.ApplicationWindow):
         rm = Gtk.Button(icon_name="user-trash-symbolic",
                         tooltip_text="Remove selected from library (files are not touched)")
         rm.add_css_class("flat")
+        rm.update_property([Gtk.AccessibleProperty.LABEL], ["Remove selected from library"])
         rm.connect("clicked", lambda *_: self.remove_selected())
         self.rm_btn = rm
         foot.append(self.sel_label)
@@ -199,6 +229,14 @@ class MainWindow(Adw.ApplicationWindow):
                                                               "view-list-symbolic")
         self.pages = (self.inspect, self.fix, self.edit, self.tools)
         tv.set_content(self.stack)
+        # Alt+1…5 switch pages
+        keys = Gtk.ShortcutController(scope=Gtk.ShortcutScope.MANAGED)
+        for n, name in enumerate(("inspect", "fix", "edit", "tools", "queue"), 1):
+            keys.add_shortcut(Gtk.Shortcut.new(
+                Gtk.ShortcutTrigger.parse_string(f"<Alt>{n}"),
+                Gtk.CallbackAction.new(lambda *_a, nm=name: self.stack.set_visible_child_name(nm)
+                                       or True)))
+        self.add_controller(keys)
 
         self.switcher_bar = Adw.ViewSwitcherBar(stack=self.stack)
         tv.add_bottom_bar(self.switcher_bar)
@@ -222,11 +260,12 @@ class MainWindow(Adw.ApplicationWindow):
     def _select_items(self, items):
         n = self.library.store.get_n_items()
         wanted = set(id(i) for i in items)
-        first = True
+        bits = Gtk.Bitset.new_empty()
         for pos in range(n):
             if id(self.library.store.get_item(pos)) in wanted:
-                self.selection.select_item(pos, first)
-                first = False
+                bits.add(pos)
+        # one change for the whole set (selecting row by row re-plans every page each time)
+        self.selection.set_selection(bits, Gtk.Bitset.new_range(0, n))
 
     def selected_items(self) -> list[MediaItem]:
         bits = self.selection.get_selection()
@@ -247,12 +286,22 @@ class MainWindow(Adw.ApplicationWindow):
         self._selection_changed()
 
     def _selection_changed(self):
+        """Refresh the pages once the current burst of changes is over (adding a folder
+        or probing finishing emits one change per clip)."""
+        if not self._refresh_pending:
+            self._refresh_pending = GLib.idle_add(self._refresh_pages)
+
+    def _refresh_pages(self):
+        self._refresh_pending = 0
+        if self._closed:
+            return False
         items = self.selected_items()
         n = len(self.library)
         self.sel_label.set_label(f"{len(items)} of {n} selected" if n else "")
         self.rm_btn.set_sensitive(bool(items))
         for p in self.pages:
             p.set_items(items)
+        return False
 
     def _item_ready(self, item: MediaItem):
         if item in self.selected_items():
@@ -305,7 +354,8 @@ class MainWindow(Adw.ApplicationWindow):
             return False
         files = [p for p in paths if os.path.isdir(p) or is_media_path(p)]
         if not files:
-            files = paths   # unknown extension: let probing decide
+            self.toast("No video or audio files in what was dropped")
+            return False
         self.add_paths(files)
         return True
 
@@ -335,8 +385,17 @@ class MainWindow(Adw.ApplicationWindow):
             gone = self.library.find(job.result.replaced_original)
             if gone and os.path.exists(gone.path):
                 self.library.refresh(gone)    # the fixed file took the original's name
+                for p in self.pages:          # players still hold the trashed original
+                    if hasattr(p, "player") and p.player.path == gone.path:
+                        p.player.reload()
             elif gone:
+                # new name (format changed): the fixed file takes the original's place
+                was_selected = gone in self.selected_items()
                 self.library.remove([gone])
+                added = self.add_paths([job.result.output])
+                if was_selected and added:
+                    keep = [i for i in self.selected_items()] + added
+                    self._select_items(keep)
         if self.queue.active_count() == 0:
             self._announce_batch()
         return False

@@ -7,6 +7,7 @@ import itertools
 import os
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -15,6 +16,7 @@ from .runner import Result, execute
 
 QUEUED, RUNNING, DONE, FAILED, CANCELLED = "queued", "running", "done", "failed", "cancelled"
 _ids = itertools.count(1)
+_SKIP = object()
 
 
 @dataclass(eq=False)
@@ -45,6 +47,7 @@ class JobQueue:
         self._running = 0
         self._closing = False
         self._reserved: set[str] = set()   # outputs claimed by queued/running jobs
+        self._skipped: list[Job] = []      # failed because a job they waited for failed
 
     # ---------------------------------------------------------------- public
     def submit(self, plan: Plan, after: Job | None = None) -> Job:
@@ -54,7 +57,7 @@ class JobQueue:
             self._reserved.add(plan.output)
             self._ensure_workers()
             self._cv.notify_all()
-        self.on_change(job)
+        self._notify(job)
         return job
 
     def reserved_outputs(self) -> set[str]:
@@ -73,7 +76,7 @@ class JobQueue:
             job.cancel.set()
             self._cv.notify_all()   # jobs waiting on this one may start now
         if notify:
-            self.on_change(job)
+            self._notify(job)
 
     def cancel_all(self):
         for j in list(self.jobs):
@@ -120,19 +123,42 @@ class JobQueue:
             self._workers.append(t)
             t.start()
 
+    @staticmethod
+    def _sources(job: Job) -> set[str]:
+        return {os.path.realpath(i.path) for i in job.plan.inputs}
+
     def _ready(self, job: Job) -> bool:
         if job.after is not None and not job.after.finished:
             return False
-        if job.plan.replace_original:
-            # the original goes to the Trash when this finishes: let every job queued
-            # earlier that reads the same file go first
-            srcs = {i.path for i in job.plan.inputs}
-            for other in self.jobs:
-                if other is job:
-                    break
-                if not other.finished and srcs & {i.path for i in other.plan.inputs}:
+        srcs = self._sources(job)
+        for other in self.jobs:
+            if other is job or other.finished or not (srcs & self._sources(other)):
+                continue
+            if job.plan.replace_original:
+                # the original goes to the Trash when this finishes: jobs queued earlier
+                # that read the same file go first, and nothing else may be reading it
+                if other.state == RUNNING or self.jobs.index(other) < self.jobs.index(job):
                     return False
+            elif other.plan.replace_original and other.state == RUNNING:
+                # a job queued later must not read a file that is being replaced under it;
+                # it starts afterwards and then fails cleanly ("source changed")
+                return False
         return True
+
+    def _blocked_by_failure(self, job: Job) -> str:
+        a = job.after
+        if a is None or not a.finished or a.state == DONE:
+            return ""
+        return (f"not started: {os.path.basename(a.plan.output)} "
+                f"{'was cancelled' if a.state == CANCELLED else 'failed'}, so the original "
+                "was left untouched" if job.plan.replace_original else
+                f"not started: {os.path.basename(a.plan.output)} did not finish")
+
+    def _notify(self, job: Job):
+        try:
+            self.on_change(job)
+        except Exception:  # noqa: BLE001 - a UI callback must never kill a worker
+            traceback.print_exc()
 
     def _next(self) -> Job | None:
         with self._cv:
@@ -146,6 +172,15 @@ class JobQueue:
                     return None
                 if self._running < self._max:
                     for j in self.jobs:
+                        if j.state == QUEUED and (why := self._blocked_by_failure(j)):
+                            j.result = Result(ok=False, failures=[why])   # before the state
+                            j.state, j.status = FAILED, "Failed"
+                            self._reserved.discard(j.plan.output)
+                            self._skipped.append(j)
+                            self._cv.notify_all()
+                    if self._skipped:
+                        return _SKIP           # report them outside the lock first
+                    for j in self.jobs:
                         if j.state == QUEUED and self._ready(j):
                             j.state = RUNNING
                             j.status = "Starting"
@@ -156,14 +191,20 @@ class JobQueue:
     def _loop(self):
         while True:
             job = self._next()
+            if job is _SKIP:
+                with self._cv:
+                    skipped, self._skipped = self._skipped, []
+                for s in skipped:
+                    self._notify(s)
+                continue
             if job is None:
                 return
-            self.on_change(job)
+            self._notify(job)
 
             def progress(frac: float, text: str, j=job):
                 j.progress = frac
                 j.status = text
-                self.on_change(j)
+                self._notify(j)
             try:
                 res = execute(job.plan, job.cancel, progress, thorough=self.thorough())
             except Exception as e:  # execute already guards; belt and braces
@@ -179,4 +220,4 @@ class JobQueue:
                 self._running -= 1
                 self._reserved.discard(job.plan.output)
                 self._cv.notify_all()
-            self.on_change(job)
+            self._notify(job)

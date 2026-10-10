@@ -42,6 +42,8 @@ class ToolsPage(Gtk.Box):
         self.m_codec = KeyCombo("Codec", [("h264", "H.264"), ("hevc", "HEVC (H.265)"),
                                           ("av1", "AV1")])
         self.m_gpu = Adw.SwitchRow(title="Use GPU (NVENC)")
+        self.m_gpu.set_active(ctx.settings.gpu)
+        self.m_gpu.connect("notify::active", lambda *_: self._remember_gpu())
         self.m_res = KeyCombo("Size", [("0", "Same as first clip"), ("2160", "2160p"),
                                        ("1080", "1080p"), ("720", "720p")])
         for w in (self.m_reencode, self.m_codec, self.m_gpu, self.m_res):
@@ -112,8 +114,9 @@ class ToolsPage(Gtk.Box):
                             tooltip_text="Move up", sensitive=n > 0)
             down = Gtk.Button(icon_name="go-down-symbolic", valign=Gtk.Align.CENTER,
                               tooltip_text="Move down", sensitive=n < len(clips) - 1)
-            for b in (up, down):
+            for b, what in ((up, "up"), (down, "down")):
                 b.add_css_class("flat")
+                b.update_property([Gtk.AccessibleProperty.LABEL], [f"Move {it.name} {what}"])
             up.connect("clicked", lambda _b, i=it: self._move(i, -1))
             down.connect("clicked", lambda _b, i=it: self._move(i, 1))
             row.add_suffix(up)
@@ -151,6 +154,11 @@ class ToolsPage(Gtk.Box):
         self.m_go.set_title(f"Join {len(clips)} clips ({fmt_duration(total)})"
                             if len(clips) >= 2 else "Select at least two clips")
 
+    def _remember_gpu(self):
+        if self.ctx.settings.gpu != self.m_gpu.get_active():
+            self.ctx.settings.gpu = self.m_gpu.get_active()
+            self.ctx.settings.save()
+
     def _move(self, item, delta):
         clips = self._ready_order()
         if item not in clips:      # re-probing after a change; the list refreshes shortly
@@ -169,7 +177,7 @@ class ToolsPage(Gtk.Box):
         r = Recipe(vcodec=self.m_codec.get_key(), gpu=self.m_gpu.get_visible() and
                    self.m_gpu.get_active(), scale_height=int(self.m_res.get_key()))
         try:
-            plan = ops.build_merge([i.info for i in clips], r, self.ctx.settings.out_dir,
+            plan = ops.build_merge([i.info for i in clips], r, self.ctx.out_dir,
                                    self.ctx.encoders, force_reencode=self.m_reencode.get_active(),
                                    taken=self.ctx.taken())
         except PlanError as e:
@@ -192,7 +200,7 @@ class ToolsPage(Gtk.Box):
             return
         try:
             plan = ops.build_snapshot(clips[0].info, at, self.s_fmt.get_key(),
-                                      self.ctx.settings.out_dir, self.ctx.taken())
+                                      self.ctx.out_dir, self.ctx.taken())
         except PlanError as e:
             self.ctx.toast(str(e))
             return
@@ -209,7 +217,7 @@ class ToolsPage(Gtk.Box):
                 plan = ops.build_contact_sheet(it.info, int(self.c_cols.get_value()),
                                                int(self.c_rows.get_value()),
                                                int(self.c_w.get_value()),
-                                               self.ctx.settings.out_dir, taken)
+                                               self.ctx.out_dir, taken)
             except PlanError as e:
                 self.ctx.toast(f"{it.name}: {e}")
                 continue

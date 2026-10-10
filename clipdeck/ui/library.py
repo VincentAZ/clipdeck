@@ -78,14 +78,20 @@ class Library:
         return out
 
     def add_paths(self, paths: list[str]) -> list[MediaItem]:
+        known = {it.path for it in self.items()}
         added = []
         for p in self.expand(paths):
-            if self.find(p):
+            ap = os.path.abspath(p)
+            if ap in known:
                 continue
-            item = MediaItem(p)
-            self.store.append(item)
-            added.append(item)
-            _pool.submit(self._probe, item)
+            known.add(ap)
+            added.append(MediaItem(ap))
+        if added:
+            # one store change for the whole batch, not one per file
+            n = self.store.get_n_items()
+            self.store.splice(n, 0, added)
+            for item in added:
+                _pool.submit(self._probe, item)
         return added
 
     def remove(self, items: list[MediaItem]):

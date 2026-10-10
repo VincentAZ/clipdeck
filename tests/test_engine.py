@@ -10,6 +10,9 @@ import threading
 import time
 import unittest
 
+# keep the in-progress journal and settings away from a real Clipdeck running beside us
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="clipdeck-test-config-")
+
 from clipdeck import media, ops, runner
 from clipdeck.jobs import CANCELLED, DONE, FAILED, JobQueue
 from clipdeck.media import probe
@@ -29,6 +32,11 @@ def setUpModule():
 
 def src(name):
     return os.path.join(SRC, name)
+
+
+def read(path, mode="r"):
+    with open(path, mode) as f:
+        return f.read()
 
 
 class Base(unittest.TestCase):
@@ -175,7 +183,7 @@ class AutoFixTests(Base):
             dest = os.path.join(self.out, "trash-" + os.path.basename(p))
             shutil.move(p, dest)
             trashed.append(dest)
-            return True
+            return ""
         runner.trash = fake_trash
         try:
             info = probe(os.path.join(work, "clip.mp4"))
@@ -477,7 +485,7 @@ class SafetyTests(Base):
         with open(target, "w") as f:
             f.write("precious")
         res = self.run_plan(self.build("upright.mp4", scale_height=90))
-        self.assertEqual(open(target).read(), "precious")
+        self.assertEqual(read(target), "precious")
         self.assertTrue(res.output.endswith("upright_edited (2).mp4"))
 
     def test_publish_race_never_overwrites(self):
@@ -486,7 +494,7 @@ class SafetyTests(Base):
         with open(plan.output, "w") as f:
             f.write("late arrival")
         res = self.run_plan(plan)
-        self.assertEqual(open(plan.output).read(), "late arrival")
+        self.assertEqual(read(plan.output), "late arrival")
         self.assertNotEqual(res.output, plan.output)
 
     def test_reserved_names_unique(self):
@@ -533,7 +541,7 @@ class SafetyTests(Base):
         plan = self.build("upright.mp4", scale_height=90)
         res = self.run_plan(plan)
         # chop the file in half and re-verify it
-        data = open(res.output, "rb").read()
+        data = read(res.output, "rb")
         bad = os.path.join(self.out, "chopped.mp4")
         with open(bad, "wb") as f:
             f.write(data[: len(data) // 2])
@@ -694,8 +702,8 @@ class ReviewRegressionTests(Base):
             got = runner.publish(tmp, final)
         finally:
             os.link = real_link
-        self.assertEqual(open(final).read(), "old")
-        self.assertEqual(open(got).read(), "new")
+        self.assertEqual(read(final), "old")
+        self.assertEqual(read(got), "new")
 
     def test_missing_source_fails_cleanly(self):
         work = os.path.join(self.out, "m")
@@ -897,6 +905,285 @@ class QueueTests(Base):
             time.sleep(0.05)
         self.assertEqual(job.state, FAILED)
         q.shutdown()
+
+
+class ThirdReviewTests(Base):
+    # ---- planning
+    def test_stream_lengths_differ(self):
+        # keeping only the shorter stream must expect that stream's length, not the file's
+        self.run_plan(self.build("alonger.mp4", remove_audio=True))
+        self.run_plan(self.build("alonger.mp4", fmt="gif", gif_width=160))
+        self.run_plan(self.build("vlonger.mp4", fmt="m4a"))
+        self.run_plan(self.build("vlonger.mp4", fmt="mp3"))
+
+    def test_opus_three_and_four_channels(self):
+        for name, ch in (("ch3.mkv", 3), ("ch4.mkv", 4)):
+            res = self.run_plan(self.build(name, fmt="webm"))
+            self.assertEqual(probe(res.output).audio[0].channels, ch)
+
+    def test_odd_sample_rate_is_snapped(self):
+        for fmt, rate in (("m4a", 32000), ("mp3", 32000)):
+            res = self.run_plan(self.build("odd_rate.wav", fmt=fmt))
+            self.assertEqual(probe(res.output).audio[0].sample_rate, rate)
+
+    def test_odd_crop_without_even_rounding(self):
+        crop = (201, 101, 11, 11)
+        res = self.run_plan(self.build("upright.mp4", fmt="gif", gif_width=0, crop=crop))
+        self.assertEqual((probe(res.output).width, probe(res.output).height), (201, 101))
+        res = self.run_plan(self.build("upright.mp4", fmt="mov", vcodec="prores", crop=crop))
+        self.assertEqual((probe(res.output).width, probe(res.output).height), (201, 101))
+
+    def test_preroll_is_never_copied(self):
+        with self.assertRaises(PlanError):
+            self.build("fasttrim.mp4", fmt="mp4", vcodec="copy", bake_rotation=False)
+        with self.assertRaises(PlanError):
+            self.build("fasttrim.mp4", fmt="mkv", rotate_lossless=True, rotate=90)
+        res = self.run_plan(self.build("fasttrim.mp4", fmt="mov", strip_metadata=True))
+        self.assertAlmostEqual(probe(res.output).duration, 2.0, delta=0.15)
+
+    def test_lossless_rotation_refuses_avi_to_mp4(self):
+        with self.assertRaises(PlanError):
+            self.build("h264.avi", fmt="mp4", rotate_lossless=True, rotate=90)
+
+    def test_svtav1_minimum_size(self):
+        with self.assertRaises(PlanError):
+            self.build("tiny.mp4", vcodec="av1", scale_height=32)
+
+    @unittest.skipUnless(HAVE_NVENC, "no NVENC")
+    def test_too_small_for_gpu_falls_back_to_cpu(self):
+        plan = self.build("tiny.mp4", vcodec="hevc", gpu=True)
+        self.assertNotIn("hevc_nvenc", plan.steps[0].argv)
+        self.assertIn("libx265", plan.steps[0].argv)
+        self.run_plan(plan)
+
+    def test_target_size_counts_pcm_audio(self):
+        # MOV keeps PCM: 20 s of 48 kHz stereo 24-bit is ~5.5 MB on its own
+        with self.assertRaises(PlanError):
+            self.build("st48.mp4", fmt="mov", vcodec="h264", target_mb=3)
+        res = self.run_plan(self.build("st48.mp4", fmt="mov", vcodec="h264", acodec="pcm16",
+                                       target_mb=6))
+        self.assertLessEqual(os.path.getsize(res.output), 6 * 1048576)
+
+    def test_gif_rate_capped_after_speedup(self):
+        plan = self.build("silent60.mp4", fmt="gif", gif_fps=0, gif_width=160, speed=2.0)
+        self.assertIn("fps=50", " ".join(plan.steps[0].argv))
+        self.run_plan(plan)
+
+    def test_contact_sheet_seeks_and_cleans_up(self):
+        plan = ops.build_contact_sheet(probe(src("long.mp4")), 4, 3, 160, out_dir=self.out)
+        self.assertEqual(len(plan.steps), 13)
+        res = self.run_plan(plan)
+        self.assertEqual(sorted(os.listdir(self.out)), [os.path.basename(res.output)])
+
+    def test_long_names_fit(self):
+        long = os.path.join(self.out, "ü" * 120 + ".mp4")       # 240 bytes
+        shutil.copy(src("upright.mp4"), long)
+        plan = ops.build(probe(long), Recipe(scale_height=90), encoders=ENC)
+        self.assertLessEqual(len(os.path.basename(plan.output).encode()), 255)
+        self.assertLessEqual(len(os.path.basename(plan.temp).encode()), 255)
+        self.run_plan(plan)
+
+    def test_cfr_fix_covers_nearly_constant_clips(self):
+        # 29.97 nominal with a few dropped frames: under the VFR warning threshold, but
+        # "constant frame rate" must still make it exactly constant
+        path = os.path.join(self.out, "drops.mp4")
+        fixtures.run("-f", "lavfi", "-i", "testsrc2=s=160x90:r=30:d=10",
+                     "-vf", "select='not(eq(n\\,150))'", "-fps_mode", "vfr",
+                     "-c:v", "libx264", path)
+        info = probe(path)
+        self.assertFalse(info.is_vfr)
+        self.assertFalse(info.is_exact_cfr)
+        self.assertIsNone(ops.autofix_recipe(info))
+        res = self.run_plan(ops.build(info, ops.autofix_recipe(info, cfr=True), out_dir=self.out,
+                                      encoders=ENC))
+        self.assertTrue(probe(res.output).is_exact_cfr)
+
+    def test_contact_sheet_uses_video_length(self):
+        plan = ops.build_contact_sheet(probe(src("alonger.mp4")), 4, 4, 80, out_dir=self.out)
+        self.run_plan(plan)
+        # a still that cannot be grabbed fails the job instead of leaving a blank tile
+        plan = ops.build_contact_sheet(probe(src("alonger.mp4")), 2, 1, 80, out_dir=self.out)
+        plan.steps[1].argv[plan.steps[1].argv.index("-ss") + 1] = "60"
+        self.assertFalse(self.run_plan(plan, expect_ok=False).ok)
+
+    def test_bit_depth_from_pixel_format(self):
+        path = os.path.join(self.out, "nv12.mkv")
+        fixtures.run("-f", "lavfi", "-i", "testsrc2=s=64x64:d=0.2", "-pix_fmt", "nv12",
+                     "-c:v", "rawvideo", path)
+        self.assertEqual(probe(path).bit_depth, 8)
+        self.assertNotIn("yuv420p10le", self.build_path(path, vcodec="hevc").steps[0].argv)
+
+    def build_path(self, path, **kw):
+        return ops.build(probe(path), Recipe(**kw), out_dir=self.out, encoders=ENC)
+
+    def test_kept_result_survives_next_start(self):
+        plan = self.build("upright.mp4", scale_height=90)
+        orig = runner.publish
+
+        def full_disk(tmp, final):
+            if final == plan.output:
+                raise OSError(28, "No space left on device")
+            return orig(tmp, final)
+        runner.publish = full_disk
+        try:
+            res = self.run_plan(plan, expect_ok=False)
+        finally:
+            runner.publish = orig
+        self.assertTrue(os.path.isfile(res.output), res.failures)
+        runner.clean_stale_partials()
+        self.assertTrue(os.path.isfile(res.output), "kept result deleted at next start")
+        os.unlink(res.output)
+
+    # ---- running
+    def test_size_target_retries_when_over(self):
+        plan = self.build("long.mp4", vcodec="h264", target_mb=1.0)
+        plan.expect.max_bytes = int(0.6 * 1048576)     # pretend the first encode lands over
+        res = self.run_plan(plan)
+        self.assertLessEqual(os.path.getsize(res.output), plan.expect.max_bytes)
+        self.assertTrue(any("to fit the size" in w for w in res.warnings), res.warnings)
+
+    def test_edit_list_output_frame_count(self):
+        # a lossless copy of a keyframe-trimmed MP4 must not fail on hidden frames
+        trimmed = self.run_plan(self.build("longgop.mp4", vcodec="copy", acodec="copy",
+                                           trim_start=5, trim_end=7, trim_exact=False))
+        info = probe(trimmed.output)
+        self.assertTrue(info.preroll)
+        self.run_plan(ops.build(info, Recipe(fmt="mkv"), out_dir=self.out, encoders=ENC))
+
+    def test_dangling_symlink_at_output_name(self):
+        plan = self.build("upright.mp4", scale_height=90)
+        os.symlink("/nonexistent/target", plan.output)
+        res = self.run_plan(plan)
+        self.assertNotEqual(res.output, plan.output)
+        self.assertTrue(os.path.islink(plan.output))
+
+    def test_checksum_failure_is_a_failure(self):
+        plan = self.build("upright.mp4", vcodec="copy", acodec="copy", fmt="mkv")
+        plan.expect.video_md5_from = os.path.join(self.out, "missing.mp4")
+        res = self.run_plan(plan, expect_ok=False)
+        self.assertFalse(res.ok)
+
+    def test_ffmpeg_error_text_in_failure(self):
+        plan = self.build("upright.mp4", scale_height=90)
+        plan.steps[0].argv.insert(-1, "-nonsense-option")
+        res = self.run_plan(plan, expect_ok=False)
+        self.assertIn("Option not found", res.failures[0])
+
+    def test_trash_failure_reason_kept(self):
+        work = os.path.join(self.out, "w")
+        os.makedirs(work)
+        shutil.copy(src("phone.mp4"), os.path.join(work, "clip.mp4"))
+        orig = runner.trash
+        runner.trash = lambda p: "Trashing on system internal mounts is not supported"
+        try:
+            info = probe(os.path.join(work, "clip.mp4"))
+            r = ops.autofix_recipe(info)
+            r.replace_original = True
+            res = self.run_plan(ops.build(info, r, encoders=ENC))
+        finally:
+            runner.trash = orig
+        self.assertTrue(any("not supported" in w for w in res.warnings), res.warnings)
+        self.assertTrue(os.path.exists(os.path.join(work, "clip.mp4")))
+
+    def test_replace_into_output_folder_stays_there(self):
+        work, dest = os.path.join(self.out, "w"), os.path.join(self.out, "dest")
+        os.makedirs(work)
+        os.makedirs(dest)
+        shutil.copy(src("phone.mp4"), os.path.join(work, "clip.mp4"))
+        orig = runner.trash
+        runner.trash = lambda p: (os.unlink(p), "")[1]
+        try:
+            info = probe(os.path.join(work, "clip.mp4"))
+            r = ops.autofix_recipe(info)
+            r.replace_original = True
+            res = self.run_plan(ops.build(info, r, out_dir=dest, encoders=ENC))
+        finally:
+            runner.trash = orig
+        self.assertEqual(os.path.dirname(res.output), dest)
+        self.assertEqual(os.listdir(work), [])
+
+    def test_stale_partials_cleaned(self):
+        stale = os.path.join(self.out, ".x-0123456789.clipdeck-partial.mp4")
+        keep = os.path.join(self.out, "precious.mp4")
+        for p in (stale, keep):
+            open(p, "w").close()
+        runner._journal(add=[stale, keep])
+        runner.clean_stale_partials()
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.exists(keep))      # never anything but our own temp names
+
+    def test_settings_survive_odd_json(self):
+        from clipdeck.settings import Settings, config_dir
+        os.makedirs(config_dir(), exist_ok=True)
+        path = os.path.join(config_dir(), "settings.json")
+        for raw in ("null", "42", '"x"', '{"workers": true, "thorough": 0}'):
+            with open(path, "w") as f:
+                f.write(raw)
+            s = Settings.load()
+            self.assertEqual((s.workers, s.thorough), (1, True))
+        os.unlink(path)
+
+    # ---- queue ordering
+    def wait(self, jobs, timeout=120):
+        deadline = time.time() + timeout
+        while not all(j.finished for j in jobs) and time.time() < deadline:
+            time.sleep(0.05)
+
+    def test_replace_original_blocks_later_readers(self):
+        work = os.path.join(self.out, "w")
+        os.makedirs(work)
+        path = os.path.join(work, "clip.mp4")
+        shutil.copy(src("phone.mp4"), path)
+        orig = runner.trash
+        runner.trash = lambda p: (os.unlink(p), "")[1]
+        try:
+            q = JobQueue(lambda j: None, workers=2)
+            info = probe(path)
+            r = ops.autofix_recipe(info)
+            r.replace_original = True
+            fix = q.submit(ops.build(info, r, encoders=ENC))
+            later = q.submit(ops.build(info, Recipe(fmt="mkv"), out_dir=self.out,
+                                       encoders=ENC))
+            self.wait([fix, later])
+            q.shutdown()
+        finally:
+            runner.trash = orig
+        self.assertEqual(fix.state, DONE)
+        # it read the file only after the replacement, and says so instead of mixing both
+        self.assertEqual(later.state, FAILED)
+        self.assertIn("source changed", later.result.failures[0])
+
+    def test_failed_dependency_keeps_original(self):
+        q = JobQueue(lambda j: None)
+        first = self.build("upright.mp4", scale_height=90)
+        first.expect.vcodec = "nope"                 # will fail verification
+        a = q.submit(first)
+        r = Recipe(scale_height=120, replace_original=True)
+        b = q.submit(ops.build(probe(src("upright.mp4")), r, out_dir=self.out,
+                               encoders=ENC, taken={first.output}), after=a)
+        self.wait([a, b])
+        q.shutdown()
+        self.assertEqual((a.state, b.state), (FAILED, FAILED))
+        self.assertIn("left untouched", b.result.failures[0])
+        self.assertTrue(os.path.exists(src("upright.mp4")))
+
+    def test_callback_error_does_not_kill_worker(self):
+        calls = []
+
+        def boom(j):
+            calls.append(j.state)
+            if len(calls) == 2:
+                raise RuntimeError("UI exploded")
+        q = JobQueue(boom)
+        jobs = [q.submit(self.build("upright.mp4", scale_height=90))]
+        jobs.append(q.submit(ops.build(probe(src("upright.mp4")), Recipe(scale_height=120),
+                                       out_dir=self.out, encoders=ENC,
+                                       taken={jobs[0].plan.output})))
+        from unittest import mock
+        with mock.patch("traceback.print_exc"):       # the expected error, not noise
+            self.wait(jobs)
+            q.shutdown()
+        self.assertEqual([j.state for j in jobs], [DONE, DONE])
 
 
 if __name__ == "__main__":

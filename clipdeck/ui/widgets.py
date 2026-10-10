@@ -65,6 +65,12 @@ class Player(Gtk.Box):
         else:
             self.video.set_media_stream(None)
 
+    def reload(self):
+        """Open the file again (it was replaced on disk under the same name)."""
+        path, self.path = self.path, None
+        self.video.set_media_stream(None)
+        self.load(path)
+
     def pause(self):
         stream = self.video.get_media_stream()
         if stream is not None and stream.get_playing():

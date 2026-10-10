@@ -37,7 +37,7 @@ def scenario(app, win):
 
     def fake_trash(p):
         shutil.move(p, os.path.join(trash_dir, os.path.basename(p)))
-        return True
+        return ""
     runner.trash = fake_trash
 
     def check(cond, msg):
@@ -309,6 +309,38 @@ def scenario(app, win):
     prefs.thorough.set_active(True)
     prefs.close()
     yield 0.3
+
+    # ---------------------------------------------------------------- third review
+    # Delete must not be a window-wide shortcut (it emptied the library while typing)
+    check(not app.get_actions_for_accel("Delete"), "Delete is an application accel")
+    # the remux preset clears edits that would force a re-encode
+    select("upright.mp4")
+    page("edit")
+    yield 0.3
+    win.edit.speed.set_key("2")
+    win.edit.preset.set_key("remux")
+    yield 0.5
+    check(win.edit.speed.get_key() == "1", "remux preset kept a 2x speed")
+    check(any("copied" in line for line in win.edit.summary.get_label().splitlines()),
+          f"remux not lossless: {win.edit.summary.get_label()}")
+    win.edit.preset.set_key("custom")
+    # dropping something that is not media adds nothing
+    n = len(win.library)
+    junk = os.path.join(work, "notes.txt")
+    with open(junk, "w") as f:
+        f.write("hi")
+    from gi.repository import Gdk, Gio
+    win._on_drop(None, Gdk.FileList.new_from_list([Gio.File.new_for_path(junk)]), 0, 0)
+    check(len(win.library) == n, "a text file was added to the library")
+    os.unlink(junk)
+    # widths between the breakpoints must not overflow (layout warnings fail the test)
+    for size in ((1150, 800), (1000, 650), (500, 480)):
+        win.set_default_size(*size)
+        for name in ("inspect", "fix", "edit", "tools", "queue"):
+            page(name)
+            yield 0.8
+    win.set_default_size(1320, 860)
+    yield 0.5
 
     # ---------------------------------------------------------------- narrow layout
     win.set_default_size(720, 800)

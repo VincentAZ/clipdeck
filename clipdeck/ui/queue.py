@@ -59,53 +59,57 @@ class JobRow(Gtk.ListBoxRow):
     def _btn(icon, tip, cb):
         b = Gtk.Button(icon_name=icon, tooltip_text=tip)
         b.add_css_class("flat")
+        b.update_property([Gtk.AccessibleProperty.LABEL], [tip])
         b.connect("clicked", lambda *_: cb())
         return b
 
     def update(self):
         j = self.job
+        # state first: a worker stores the result before the state, so a finished state
+        # read here always comes with its result
+        state = j.state
         r = j.result
         out = r.output if (r and r.output) else j.plan.output
         self.title.set_label(os.path.basename(out))
         self.set_tooltip_text(out)
-        self.icon.set_from_icon_name(STATE_ICON[j.state])
+        self.icon.set_from_icon_name(STATE_ICON[state])
         for c in STATE_CLASS.values():
             self.icon.remove_css_class(c)
-        if j.state in STATE_CLASS:
-            self.icon.add_css_class(STATE_CLASS[j.state])
+        if state in STATE_CLASS:
+            self.icon.add_css_class(STATE_CLASS[state])
         src = ", ".join(os.path.basename(i.path) for i in j.plan.inputs[:3])
         if len(j.plan.inputs) > 3:
             src += f" +{len(j.plan.inputs) - 3}"
-        if j.state == QUEUED:
+        if state == QUEUED:
             text = f"Waiting · from {src}"
             if j.after is not None and not j.after.finished:
                 text = f"Waiting for {os.path.basename(j.after.plan.output)} · from {src}"
-        elif j.state == RUNNING:
+        elif state == RUNNING:
             text = f"{j.status} · {int(j.progress * 100)}%"
-        elif j.state == DONE:
+        elif state == DONE:
             text = f"Verified and saved in {_fmt_elapsed(r.elapsed)} · from {src}"
             if r.replaced_original:
                 text += " · original moved to Trash"
             if r.warnings:
                 text += "\n⚠ " + "; ".join(r.warnings)
-        elif j.state == FAILED:
+        elif state == FAILED:
             text = "Failed: " + "; ".join(r.failures if r else ["unknown error"])
             if r and r.output:
                 text += f"\nBroken output kept for inspection: {os.path.basename(r.output)}"
         else:
             text = "Cancelled"
         self.detail.set_label(text)
-        self.bar.set_visible(j.state in (QUEUED, RUNNING))
+        self.bar.set_visible(state in (QUEUED, RUNNING))
         self.bar.set_fraction(j.progress)
-        if j.state == RUNNING and j.progress <= 0:
+        if state == RUNNING and j.progress <= 0:
             self.bar.pulse()
-        self.b_cancel.set_visible(not j.finished)
-        ok = j.state == DONE and r and os.path.exists(r.output)
+        self.b_cancel.set_visible(state in (QUEUED, RUNNING))
+        ok = state == DONE and r and os.path.exists(r.output)
         self.b_open.set_visible(bool(ok))
-        self.b_folder.set_visible(bool(ok) or bool(j.state == FAILED and r and r.output
+        self.b_folder.set_visible(bool(ok) or bool(state == FAILED and r and r.output
                                                      and os.path.exists(r.output)))
         self.b_add.set_visible(bool(ok))
-        self.b_log.set_visible(j.finished and r is not None)
+        self.b_log.set_visible(state not in (QUEUED, RUNNING) and r is not None)
 
     # ------------------------------------------------------------------ actions
     def _out(self):

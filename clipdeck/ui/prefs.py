@@ -1,6 +1,8 @@
-"""Preferences: where outputs go, verification depth, parallelism, GPU default."""
+"""Preferences: where outputs go, verification depth, parallelism."""
 
 from __future__ import annotations
+
+import os
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
@@ -27,7 +29,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         btn.connect("clicked", lambda *_: self._choose())
         self.folder_row.add_suffix(btn)
         g.add(self.folder_row)
-        self.beside.connect("notify::active", lambda *_: self._save())
+        self.beside.connect("notify::active", lambda *_: self._beside_changed())
 
         g = Adw.PreferencesGroup(title="Processing")
         page.add(g)
@@ -49,16 +51,30 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
     def _sync(self):
         self.folder_row.set_sensitive(not self.beside.get_active())
+        f = self.win.settings.output_folder
+        if f and not os.path.isdir(f):
+            self.folder_row.set_subtitle(f"{f} (missing: saving next to the originals)")
 
-    def _choose(self):
+    def _beside_changed(self):
+        # "one folder" without a folder would silently keep saving beside the originals
+        if not self.beside.get_active() and not self.win.settings.output_folder:
+            self._choose(revert=True)
+            return
+        self._save()
+
+    def _choose(self, revert: bool = False):
         dlg = Gtk.FileDialog(title="Output Folder", modal=True)
-        if self.win.settings.output_folder:
+        if self.win.settings.output_folder and os.path.isdir(self.win.settings.output_folder):
             dlg.set_initial_folder(Gio.File.new_for_path(self.win.settings.output_folder))
 
         def done(d, res):
             try:
                 f = d.select_folder_finish(res)
             except GLib.Error:
+                f = None
+            if not (f and f.get_path()):
+                if revert:
+                    self.beside.set_active(True)
                 return
             if f and f.get_path():
                 self.win.settings.output_folder = f.get_path()

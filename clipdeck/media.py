@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -44,6 +45,21 @@ def _rate(text) -> float:
     except (ValueError, ZeroDivisionError):
         return 0.0
     return float(f) if f > 0 else 0.0
+
+
+def _stream_duration(s: dict) -> float:
+    d = _num(s.get("duration"))
+    if d > 0:
+        return d
+    # Matroska keeps it as a tag: "00:01:02.500000000"
+    for k, v in (s.get("tags") or {}).items():
+        if k.upper().startswith("DURATION"):
+            try:
+                h, m, sec = str(v).split(":")
+                return int(h) * 3600 + int(m) * 60 + float(sec)
+            except ValueError:
+                return 0.0
+    return 0.0
 
 
 def _rotation(stream: dict) -> int:
@@ -105,6 +121,16 @@ class MediaInfo:
     preroll: bool = False      # MP4/MOV edit list hides frames before the start
     mtime_ns: int = 0          # to detect the file changing after a job was planned
     has_cover: bool = False    # attached picture (cover art) stream present
+    video_duration: float = 0.0   # per-stream lengths (0 = unknown); screen recordings
+    audio_duration: float = 0.0   # often have audio running past the video or vice versa
+
+    def length_of(self, video: bool, audio: bool) -> float:
+        """Duration of an output that keeps only these streams."""
+        if video and not audio and self.video_duration:
+            return self.video_duration
+        if audio and not video and self.audio_duration:
+            return self.audio_duration
+        return self.duration
 
     @property
     def name(self) -> str:
@@ -140,6 +166,15 @@ class MediaInfo:
         if self.is_interlaced and abs(self.r_fps - 2 * self.fps) / self.r_fps < 0.01:
             return False      # field rate vs frame rate, not variable
         return abs(self.fps - self.r_fps) / self.r_fps > 0.01
+
+    @property
+    def is_exact_cfr(self) -> bool:
+        """Frames arrive exactly at the nominal rate (no dropped or uneven frames)."""
+        if not (self.fps and self.r_fps):
+            return True       # nothing to go on: do not assume a problem
+        if self.is_interlaced and abs(self.r_fps - 2 * self.fps) / self.r_fps < 0.01:
+            return True
+        return abs(self.fps - self.r_fps) / self.r_fps <= 0.001
 
     @property
     def is_hdr(self) -> bool:
@@ -263,14 +298,20 @@ def probe(path: str, timeout: float = 30) -> MediaInfo:
             info.color_transfer = s.get("color_transfer", "") or ""
             info.color_space = s.get("color_space", "") or ""
             info.color_range = s.get("color_range", "") or ""
+            info.video_duration = _stream_duration(s)
             depth = s.get("bits_per_raw_sample")
             if depth:
                 info.bit_depth = int(_num(depth, 8))
-            elif "10" in info.pix_fmt:
-                info.bit_depth = 10
+            else:
+                # yuv420p10le, p010le, gbrp12le… (nv12 is 8-bit: the digits are not a depth)
+                m = re.search(r"(?:p0?|gray)(\d{2})(le|be)?$", info.pix_fmt)
+                if m and not info.pix_fmt.startswith(("nv", "rgb", "bgr")):
+                    info.bit_depth = int(m.group(1))
             if not info.duration:
                 info.duration = _num(s.get("duration"))
         elif kind == "audio":
+            if not info.audio:
+                info.audio_duration = _stream_duration(s)
             info.audio.append(AudioStream(
                 index=int(s.get("index", 0)),
                 codec=s.get("codec_name", "") or "",

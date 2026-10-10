@@ -3,6 +3,7 @@ what the output must look like for verification to pass)."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -166,7 +167,7 @@ class Expect:
     frames_from: str = ""             # count frames of this file and compare
     video_md5_from: str = ""
     audio_md5_from: str = ""
-    max_bytes: int = 0                # soft limit, warns only
+    max_bytes: int = 0                # size target: re-encoded at a lower bitrate if over
 
 
 @dataclass
@@ -189,6 +190,7 @@ class Plan:
     cleanup: list[str] = field(default_factory=list)
     replace_original: bool = False
     files: dict[str, str] = field(default_factory=dict)   # written before the first step
+    vbitrate: int = 0                 # target-size mode: video bits/s used in the steps
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -208,15 +210,28 @@ def unique_path(path: str, taken: set[str] | None = None) -> str:
     taken = taken or set()
     base, ext = os.path.splitext(path)
     cand, n = path, 2
-    while os.path.exists(cand) or os.path.abspath(cand) in taken:
+    # lexists: a dangling symlink still occupies the name
+    while os.path.lexists(cand) or os.path.abspath(cand) in taken:
         cand = f"{base} ({n}){ext}"
         n += 1
     return cand
 
 
+NAME_MAX = 255     # bytes per file name on every common Linux filesystem
+
+
+def fit_stem(stem: str, tail: str) -> str:
+    """Shorten stem (by whole characters) so stem + tail fits in NAME_MAX bytes, leaving
+    room for a ' (99)' de-duplication number and a '.BAD' quarantine marker."""
+    room = NAME_MAX - len(tail.encode()) - len(" (99).BAD".encode())
+    while stem and len(stem.encode()) > room:
+        stem = stem[:-1]
+    return stem.rstrip() or "clip"
+
+
 def output_path(info: MediaInfo, ext: str, suffix: str, out_dir: str | None,
                 taken: set[str] | None = None) -> str:
-    stem = os.path.splitext(os.path.basename(info.path))[0]
+    stem = fit_stem(os.path.splitext(os.path.basename(info.path))[0], f"{suffix}.{ext}")
     d = out_dir or os.path.dirname(info.path)
     name = f"{stem}{suffix}.{ext}"
     path = os.path.join(d, name)
@@ -226,9 +241,12 @@ def output_path(info: MediaInfo, ext: str, suffix: str, out_dir: str | None,
 
 
 def temp_for(final: str) -> str:
+    """Hidden work file next to the output. Short and fixed-length (a long output name
+    must not fail only because its temp name is longer), unique per output name."""
     d, name = os.path.split(final)
     stem, ext = os.path.splitext(name)
-    return os.path.join(d, f".{stem}.clipdeck-partial{ext}")
+    tag = hashlib.sha1(name.encode()).hexdigest()[:10]
+    return os.path.join(d, f".{fit_stem(stem, '')[:40]}-{tag}.clipdeck-partial{ext}")
 
 
 STANDARD_RATES = (23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 119.88, 120)
@@ -370,8 +388,10 @@ def video_encoder_args(enc: str, r: Recipe, info: MediaInfo, vbitrate: int = 0,
         if enc == "hevc_nvenc":
             a += ["-tag:v", "hvc1"]
         if vbitrate:
-            a += ["-rc", "vbr", "-b:v", str(vbitrate), "-maxrate", str(int(vbitrate * 1.5)),
-                  "-multipass", "fullres"]
+            # NVENC has no real two-pass: capping the peak rate at the average (with a 2 s
+            # buffer) is what keeps short clips from overshooting the size by 5-8%
+            a += ["-rc", "vbr", "-b:v", str(vbitrate), "-maxrate", str(vbitrate),
+                  "-bufsize", str(2 * vbitrate), "-multipass", "fullres"]
         else:
             a += ["-rc", "vbr", "-cq", str(_quality_value(enc, r)), "-b:v", "0"]
     elif enc == "prores_ks":
@@ -437,7 +457,8 @@ def _geometry(info: MediaInfo, r: Recipe, need_even: bool, upright: bool = True
         cw, ch, cx, cy = (int(v) for v in r.crop)
         if cw <= 0 or ch <= 0 or cx < 0 or cy < 0 or cx + cw > w or cy + ch > h:
             raise PlanError(f"Crop {cw}×{ch} at {cx},{cy} does not fit inside the {w}×{h} frame")
-        vf.append(f"crop={cw}:{ch}:{cx}:{cy}")
+        # exact: 4:2:0 crops would otherwise snap odd sizes/offsets to even ones
+        vf.append(f"crop={cw}:{ch}:{cx}:{cy}:exact=1")
         w, h = cw, ch
     if r.stabilize:
         vf.append("deshake")
@@ -475,21 +496,35 @@ def _geometry(info: MediaInfo, r: Recipe, need_even: bool, upright: bool = True
     return (vf, *dims(tw, th))
 
 
-def _out_duration(info: MediaInfo, r: Recipe) -> tuple[float, float]:
-    """(start, input span) after trimming, and validates the trim."""
+def _out_duration(info: MediaInfo, r: Recipe, total: float | None = None
+                  ) -> tuple[float, float]:
+    """(start, input span) after trimming, and validates the trim. total: the length of
+    the streams kept (default: the whole file)."""
+    total = info.duration if total is None else total
     start = r.trim_start or 0.0
-    if not info.duration and r.trim_end is None:
+    if not total and r.trim_end is None:
         raise PlanError(f"The length of {info.name} cannot be determined")
-    end = r.trim_end if r.trim_end is not None else info.duration
+    end = r.trim_end if r.trim_end is not None else total
     if start < 0 or end < 0:
         raise PlanError("Trim times cannot be negative")
-    if info.duration and start >= info.duration:
-        raise PlanError(f"Trim start {start:.2f}s is past the end of the clip ({info.duration:.2f}s)")
-    if info.duration:
-        end = min(end, info.duration)
+    if total and start >= total:
+        raise PlanError(f"Trim start {start:.2f}s is past the end of the clip ({total:.2f}s)")
+    if total:
+        end = min(end, total)
     if end - start < 0.05:
         raise PlanError("Trim end must be after trim start")
     return start, end - start
+
+
+AAC_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025,
+             8000, 7350)
+MP3_RATES = (48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000)
+# libopus rejects ffmpeg's default 3- and 4-channel layouts (2.1, 4.0): name supported ones
+OPUS_LAYOUTS = {3: "3.0", 4: "quad"}
+
+
+def _nearest(rate: int, allowed: tuple) -> int:
+    return min(allowed, key=lambda a: (abs(a - rate), -a))
 
 
 def _track_format(acodec: str, src_rate: int, src_ch: int) -> tuple[int, int]:
@@ -499,10 +534,21 @@ def _track_format(acodec: str, src_rate: int, src_ch: int) -> tuple[int, int]:
     if acodec == "opus":
         rate, ch = 48000, min(ch, 8)
     elif acodec == "mp3":
-        rate, ch = min(rate, 48000), min(ch, 2)
+        rate, ch = _nearest(rate, MP3_RATES), min(ch, 2)
     elif acodec == "aac":
-        rate = min(rate, 96000)
+        rate = _nearest(rate, AAC_RATES)
     return rate, ch
+
+
+def audio_bits_per_second(codec: str, rate: int, ch: int, kbps: int) -> int:
+    """Rough bitrate of one encoded or copied track, for target-size planning."""
+    rate, ch = rate or 48000, ch or 2
+    if codec.startswith("pcm"):
+        bits = 24 if ("24" in codec or codec == "pcm24") else 32 if "32" in codec else 16
+        return rate * ch * bits
+    if codec == "flac":
+        return int(rate * ch * 16 * 0.6)
+    return kbps * 1000
 
 
 def _audio_codec_args(acodec: str, r: Recipe, tracks) -> tuple[list[str], list[tuple]]:
@@ -514,7 +560,11 @@ def _audio_codec_args(acodec: str, r: Recipe, tracks) -> tuple[list[str], list[t
     expect = []
     for n, t in enumerate(tracks):
         rate, ch = _track_format(acodec, t.sample_rate, t.channels)
-        args += [f"-ar:a:{n}", str(rate), f"-ac:a:{n}", str(ch)]
+        args += [f"-ar:a:{n}", str(rate)]
+        if acodec == "opus" and ch in OPUS_LAYOUTS:
+            args += [f"-ch_layout:a:{n}", OPUS_LAYOUTS[ch]]
+        else:
+            args += [f"-ac:a:{n}", str(ch)]
         expect.append((ACODEC_NAME[acodec], rate, ch))
     return args, expect
 
@@ -544,7 +594,9 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
     if fmt.kind == "gif":
         return _build_gif(info, r, out_dir, taken, title)
 
-    start, span = _out_duration(info, r)
+    keeps_v = fmt.kind == "video"
+    keeps_a = info.has_audio and not r.remove_audio
+    start, span = _out_duration(info, r, info.length_of(keeps_v, keeps_a))
     out_dur = span / r.speed
 
     # ---------------- decide video handling
@@ -558,7 +610,10 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
             raise PlanError(f"{VCODEC_LABELS.get(want_v, want_v)} cannot go in {fmt.label}")
         copy_ok_codec = "*" in fmt.copy_v or info.vcodec in fmt.copy_v
         # hidden pre-roll (MP4 edit list) only stays hidden in MP4/MOV
-        preroll_exposed = info.preroll and fmt.ext not in ("mp4", "mov", "m4v")
+        # hidden pre-roll (an edit list left by a keyframe trim): ffmpeg does not reliably
+        # carry the edit list over when copying (real phone clips lose it even MP4 to MP4,
+        # and show the hidden frames), so such video is re-encoded
+        preroll_exposed = info.preroll
         needs_pixels = (r.has_video_filters() or (r.trimmed() and r.trim_exact)
                         or r.target_mb > 0)
         if r.rotate_lossless:
@@ -575,6 +630,13 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
             if r.target_mb > 0:
                 raise PlanError("Lossless rotation copies the video, so it cannot aim for a "
                                 "target file size")
+            if info.container == "avi" and fmt.ext in ("mp4", "mov"):
+                raise PlanError("AVI video has no reliable timestamps and cannot be copied "
+                                "into MP4/MOV, so lossless rotation is not possible")
+            if preroll_exposed:
+                raise PlanError("This clip was cut on a keyframe and hides frames before its "
+                                "start; copying would show them, so lossless rotation is not "
+                                "possible")
             vmode = "copy"
             lossless_rot = normalize_rotation(info.rotation - (r.rotate % 360))
         else:
@@ -637,11 +699,11 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
         acopy_ok = ("*" in fmt.copy_a or all(a.codec in fmt.copy_a for a in used))
         # copied audio can only start on a packet boundary near the keyframe, so an
         # exact cut needs re-encoded audio (MP4 hides the excess, MKV/WebM play it)
-        exact_cut = (r.trimmed() and r.trim_exact and vmode != "copy") or \
-            (info.preroll and fmt.ext not in ("mp4", "mov", "m4v"))
+        exact_cut = (r.trimmed() and r.trim_exact and vmode != "copy") or info.preroll
         if want_a == "copy":
             if r.has_audio_filters():
-                raise PlanError("Copying audio is impossible with speed or volume changes")
+                raise PlanError("Copying audio is impossible with speed, volume or loudness "
+                                "changes")
             if exact_cut:
                 raise PlanError("Copying audio is impossible here: the cut must be exact "
                                 "(frame-accurate trim, or a keyframe-trimmed source)")
@@ -715,6 +777,13 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
             vf, ow, oh = _geometry(info, r, need_even, upright=not keep_flag)
             if venc == "dnxhd" and (ow < 256 or oh < 120):
                 raise PlanError(f"DNxHR needs at least 256×120; this output would be {ow}×{oh}")
+            if venc == "libsvtav1" and (ow < 64 or oh < 64):
+                raise PlanError(f"AV1 needs at least 64×64; this output would be {ow}×{oh}")
+            cpu = _small_for_gpu(venc, ow, oh, encoders)
+            if cpu:
+                summary.append(f"{ow}×{oh} is below the GPU encoder's minimum size; "
+                               "encoded on the CPU")
+                venc = cpu
             tonemap = info.is_hdr and (venc in ("libx264", "h264_nvenc", "libvpx-vp9", "dnxhd")
                                        or info.bit_depth <= 8)
             if tonemap:
@@ -834,12 +903,19 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
     cleanup: list[str] = []
     if r.target_mb > 0 and vmode == "encode":
         total_bits = r.target_mb * 8 * 1024 * 1024
-        abits = (r.audio_kbps * 1000 * max(1, len(expect.audio_tracks)) if amode == "encode" else
-                 sum(a.bitrate or 128000 for a in info.audio) if amode == "copy" else 0)
-        vbit = int(total_bits / max(out_dur, 0.1) * 0.97 - abits)
+        if amode == "encode":
+            abits = sum(audio_bits_per_second(c, rt, ch, r.audio_kbps)
+                        for c, rt, ch in expect.audio_tracks)
+        elif amode == "copy":
+            abits = sum(a.bitrate or audio_bits_per_second(a.codec, a.sample_rate, a.channels,
+                                                           160) for a in info.audio)
+        else:
+            abits = 0
+        margin = 0.95 if venc.endswith("_nvenc") else 0.97   # single-pass rate control
+        vbit = int(total_bits / max(out_dur, 0.1) * margin - abits)
         if vbit < 50_000:
             raise PlanError(f"{r.target_mb:g} MB is too small for {out_dur:.0f}s of video")
-        expect.max_bytes = int(r.target_mb * 1024 * 1024 * 1.05)
+        expect.max_bytes = int(r.target_mb * 1024 * 1024)
         summary.append(f"Target size {r.target_mb:g} MB → video {vbit // 1000} kb/s")
         if venc in ("libx264", "libvpx-vp9"):
             passlog = os.path.join(tempfile.gettempdir(),
@@ -864,7 +940,23 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
 
     return Plan(title=title or os.path.basename(out), inputs=[info], output=out, temp=tmp,
                 steps=steps, expect=expect, summary=summary, cleanup=cleanup,
-                replace_original=r.replace_original)
+                replace_original=r.replace_original,
+                vbitrate=vbit if (r.target_mb > 0 and vmode == "encode") else 0)
+
+
+# smallest frame NVENC accepts (measured; below it the encoder refuses to open)
+NVENC_MIN = {"h264_nvenc": (146, 50), "hevc_nvenc": (130, 40), "av1_nvenc": (130, 96)}
+
+
+def _small_for_gpu(venc: str, w: int, h: int, encoders) -> str:
+    """CPU encoder to use instead when the frame is too small for NVENC, else ""."""
+    mw, mh = NVENC_MIN.get(venc, (0, 0))
+    if w >= mw and h >= mh:
+        return ""
+    cpu = resolve_encoder(_key_for(venc), False, encoders)
+    if cpu == "libsvtav1" and (w < 64 or h < 64):
+        raise PlanError(f"AV1 needs at least 64×64; this output would be {w}×{h}")
+    return cpu
 
 
 def _key_for(enc: str) -> str:
@@ -903,8 +995,11 @@ def _strip_audio(argv: list[str]) -> list[str]:
     return out
 
 
+GIF_MAX_FPS = 50     # GIF delays are in 1/100 s; players stretch 1/100 s frames to 1/10 s
+
+
 def _build_gif(info: MediaInfo, r: Recipe, out_dir, taken, title) -> Plan:
-    start, span = _out_duration(info, r)
+    start, span = _out_duration(info, r, info.length_of(True, False))
     out_dur = span / r.speed
     gr = replace(r, scale_width=0, scale_height=0)
     vf, w, h = _geometry(info, gr, need_even=False)
@@ -914,7 +1009,10 @@ def _build_gif(info: MediaInfo, r: Recipe, out_dir, taken, title) -> Plan:
         nh = max(1, int(round(h * r.gif_width / w)))
         vf.append(f"scale={r.gif_width}:{nh}:flags=lanczos")
         w, h = r.gif_width, nh
-    rate = r.gif_fps if (r.gif_fps and (not info.fps or r.gif_fps < info.fps)) else 0
+    src_rate = (info.fps or 0) * r.speed       # frames per second after the speed change
+    rate = r.gif_fps if (r.gif_fps and (not src_rate or r.gif_fps < src_rate)) else 0
+    if not rate and src_rate > GIF_MAX_FPS:
+        rate = GIF_MAX_FPS
     if r.speed != 1.0:
         vf.append(f"setpts=PTS/{r.speed:.6g}")
     if rate:
@@ -960,7 +1058,9 @@ def autofix_recipe(info: MediaInfo, cfr: bool = False) -> Recipe | None:
     fix_a = info.has_audio and any(a.codec not in ("aac", "mp3") for a in info.audio) \
         and info.container != "mov"
     odd = bool(info.width % 2 or info.height % 2)
-    do_cfr = cfr and info.is_vfr
+    # asked for constant frame rate: convert anything not exactly constant, including
+    # clips just under the VFR warning threshold (phones drop the odd frame)
+    do_cfr = cfr and not info.is_exact_cfr
     if not (bake or to_mp4 or fix_v or fix_a or odd or do_cfr):
         return None
     if info.container == "mov":
@@ -1082,6 +1182,7 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
         argv += ["-map", "[a]"]
     choice = r.vcodec if r.vcodec in ("h264", "hevc", "av1") else "h264"
     venc = resolve_encoder(choice, r.gpu, encoders)
+    venc = _small_for_gpu(venc, W, H, encoders) or venc
     fake = replace(first, bit_depth=8)
     argv += video_encoder_args(venc, r, fake) + SDR_TAGS
     if any_audio:
@@ -1136,7 +1237,8 @@ def build_contact_sheet(info: MediaInfo, cols: int = 4, rows: int = 4, thumb_w: 
         raise PlanError(f"{info.name} has no video")
     if not (1 <= cols <= 12 and 1 <= rows <= 12):
         raise PlanError("Grid must be between 1×1 and 12×12")
-    if info.duration <= 0:
+    length = info.length_of(True, False)    # the video's own length, not the audio's
+    if length <= 0:
         raise PlanError("Clip has no duration")
     n = cols * rows
     w, h = info.display_size
@@ -1147,17 +1249,30 @@ def build_contact_sheet(info: MediaInfo, cols: int = 4, rows: int = 4, thumb_w: 
     H = rows * th + (rows - 1) * pad + 2 * margin
     out = output_path(info, "jpg", "_contact_sheet", out_dir, taken)
     tmp = temp_for(out)
-    # pick n evenly spaced frames: sample at n/duration fps, shifted half an interval in
-    rate = n / info.duration
-    vf = (f"fps={rate:.6f}:start_time={info.duration / n / 2:.6f},"
-          f"scale={tw}:{th}:flags=lanczos,setsar=1,"
-          f"tile={cols}x{rows}:padding={pad}:margin={margin}:color=0x202020")
-    argv = list(COMMON) + ["-i", info.path, "-map", "0:v:0", "-vf", vf,
-                           "-frames:v", "1", "-update", "1", "-q:v", "3", tmp]
+    # n evenly spaced frames, each centred in its slice of the clip, grabbed one at a time
+    # by seeking straight to it: a long 4K clip costs n seeks instead of a decode of every
+    # frame (and not n decoders in memory at once), then the stills are tiled
+    last = max(0.0, length - 1.5 / (info.fps or 25))
+    stills = [f"{tmp}.{k:03d}.png" for k in range(n)]
+    listfile = tmp + ".txt"
+    steps = []
+    for k, still in enumerate(stills):
+        at = min(last, length * (k + 0.5) / n)
+        steps.append(Step(list(COMMON) + [
+            "-ss", f"{at:.6f}", "-i", info.path, "-map", "0:v:0", "-frames:v", "1",
+            "-vf", f"scale={tw}:{th}:flags=lanczos,setsar=1", "-update", "1", still],
+            f"Grabbing frame {k + 1} of {n}", 0.0))
+    # -xerror: a still that could not be grabbed must fail the job, not leave a blank tile
+    steps.append(Step(list(COMMON) + [
+        "-xerror", "-f", "concat", "-safe", "0", "-i", listfile,
+        "-vf", f"tile={cols}x{rows}:padding={pad}:margin={margin}:color=0x202020",
+        "-frames:v", "1", "-update", "1", "-q:v", "3", tmp], "Building contact sheet", 0.0))
     return Plan(title=os.path.basename(out), inputs=[info], output=out, temp=tmp,
-                steps=[Step(argv, "Building contact sheet", info.duration)],
+                steps=steps,
                 expect=Expect(kind="image", vcodec="mjpeg", width=W, height=H),
-                summary=[f"{cols}×{rows} grid of {tw}×{th} thumbnails → {W}×{H} JPEG"])
+                summary=[f"{cols}×{rows} grid of {tw}×{th} thumbnails → {W}×{H} JPEG"],
+                cleanup=stills + [listfile],
+                files={listfile: "".join(f"file {_concat_escape(s)}\n" for s in stills)})
 
 
 # ----------------------------------------------------------------------------- crop detect

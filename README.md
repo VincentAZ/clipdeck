@@ -12,9 +12,10 @@ It grew out of `~/scripts/fixrot` and keeps its two rules:
   decode of every frame plus a frame-count comparison with the source. An output that
   fails is kept as `name.BAD.ext` for inspection and is never presented as done.
 - **Nothing is ever overwritten.** Outputs get a free name (`clip (2).mp4`), are
-  published atomically, and partial files are removed on failure, cancel or quit.
+  published atomically, and partial files are removed on failure, cancel, quit, logout
+  or `kill` (and, after a crash or power cut, on the next start).
   “Replace originals” moves originals to the Trash (recoverable), only after the new
-  file has verified.
+  file has verified; no other job reads a file while it is being replaced.
 
 ## Install
 
@@ -34,23 +35,29 @@ the window, and Clipdeck appears in *Open With* for video files.
 |---|---|
 | **Inspect** | Player plus everything ffprobe knows; problems found are explained. |
 | **Quick Fix** | fixrot in a window: bakes rotation, MKV/WebM/AVI → MP4, odd codecs → H.264, FLAC/Opus/MP2 audio → AAC, optional constant frame rate, optional Resolve MOV next to each clip, optional replace-originals. Shows exactly what will happen per file. |
-| **Edit & Convert** | Presets (share, smaller HEVC, fit in 10 MB, Resolve MOV, DNxHR, ProRes, WebM, MKV remux, GIF, MP3, WAV) and every knob: format/codec/quality/speed, NVENC GPU encoding, target file size (two-pass), trim (frame-accurate or lossless keyframe cut, start/end from the player), rotate/flip (re-encoded or lossless flag-only), crop (with black-bar detection and aspect shortcuts), resize, frame rate, speed, deinterlace, stabilize, denoise, remove/normalize/boost audio, strip metadata. A live summary shows the result before anything is queued. |
-| **Tools** | Join clips (lossless when formats match, otherwise normalized re-encode), save a full-resolution frame, contact sheets. |
+| **Edit & Convert** | Presets (share, smaller HEVC, fit in 10 MB, Resolve MOV, DNxHR, ProRes, WebM, MKV remux, GIF, MP3, WAV) and every knob: format/codec/quality/speed, NVENC GPU encoding (remembered; frames too small for NVENC fall back to the CPU), target file size (two-pass; re-encoded at a lower bitrate if the result lands over), trim (frame-accurate or lossless keyframe cut, start/end from the player), rotate/flip (re-encoded or lossless flag-only), crop (with black-bar detection and aspect shortcuts), resize, frame rate, speed, deinterlace, stabilize, denoise, remove/normalize/boost audio, strip metadata. A live summary shows the result before anything is queued. |
+| **Tools** | Join clips (lossless when formats match, otherwise normalized re-encode), save a full-resolution frame, contact sheets (seeks to each frame, so an hour of 4K takes seconds). |
 | **Queue** | Live progress, cancel, open, show in folder, add result to library, full ffmpeg log per job. |
 
 Preferences: output next to originals or in one folder, thorough verification, jobs
 in parallel.
 
+Keyboard: <kbd>Ctrl</kbd>+<kbd>O</kbd> add videos, <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>5</kbd>
+switch pages, <kbd>Delete</kbd> (in the library list) removes clips from the library
+(files are not touched), <kbd>Ctrl</kbd>+<kbd>,</kbd> preferences, <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit.
+
 ## Tests
 
 ```sh
-./run-tests.sh        # engine (real ffmpeg, ~100 tests) + headless UI scenario (Xvfb)
+./run-tests.sh        # engine (real ffmpeg, ~140 tests) + headless UI scenario (Xvfb)
 ```
 
 The engine tests generate synthetic media (phone-style rotated clips, MKV/AVI/WebM,
-VFR, HDR, anamorphic, multi-track, subtitles, long-GOP…) and check results
+VFR, HDR, anamorphic, multi-track, subtitles, long-GOP, mismatched stream lengths,
+3/4-channel audio, odd sample rates…) and check results
 independently, including decoded pixel orientation. The UI test drives the real app
-under Xvfb through every page and fails on any exception or GTK warning.
+under Xvfb through every page, at several window sizes, and fails on any exception or
+GTK warning.
 
 ## Layout
 

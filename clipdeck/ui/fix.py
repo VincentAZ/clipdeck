@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, GLib, Gtk
 
 from .. import ops
 from ..ops import PlanError, Recipe
@@ -89,10 +89,10 @@ class FixPage(Gtk.Box):
                 r = ops.autofix_recipe(info, cfr=self.cfr.get_active())
                 if r:
                     r.replace_original = self.replace.get_active()
-                    fix = ops.build(info, r, self.ctx.settings.out_dir, self.ctx.encoders, taken)
+                    fix = ops.build(info, r, self.ctx.out_dir, self.ctx.encoders, taken)
                     taken.add(fix.output)
                 if self.mov.get_active() and info.has_video and info.container != "mov":
-                    mov = ops.build(info, mov_recipe(), self.ctx.settings.out_dir,
+                    mov = ops.build(info, mov_recipe(), self.ctx.out_dir,
                                     self.ctx.encoders, taken)
                     taken.add(mov.output)
             except PlanError as e:
@@ -141,7 +141,9 @@ class FixPage(Gtk.Box):
         n = len(self.items)
         self.list_group.set_description(f"{n} clip{'s' if n != 1 else ''} selected")
         self.button.set_sensitive(jobs > 0)
-        self.button.set_label(f"Fix {jobs} file{'s' if jobs != 1 else ''}" if jobs
+        trash = " (originals to Trash)" if self.replace.get_active() and \
+            any(f is not None for _, f, _, _ in planned) else ""
+        self.button.set_label(f"Fix {jobs} file{'s' if jobs != 1 else ''}{trash}" if jobs
                               else "Nothing to fix")
 
     def run(self):
@@ -159,4 +161,8 @@ class FixPage(Gtk.Box):
             self.ctx.toast(f"Queued {len(jobs)} job{'s' if len(jobs) != 1 else ''}")
             self.ctx.show_queue()
         self.refresh()
+        if jobs:
+            # a double click must not queue everything twice
+            self.button.set_sensitive(False)
+            GLib.timeout_add(700, lambda: self.refresh() and False)
 

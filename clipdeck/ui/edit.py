@@ -57,6 +57,10 @@ class InputError(ValueError):
     pass
 
 
+def _copies_video(plan) -> bool:
+    return any(s.startswith("Video:") and "copied" in s for s in plan.summary)
+
+
 class EditPage(Gtk.Box):
     def __init__(self, ctx):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
@@ -107,13 +111,18 @@ class EditPage(Gtk.Box):
         card.append(self.error)
         left.append(card)
 
-        self.queue_btn = Gtk.Button(label="Add to queue", halign=Gtk.Align.CENTER)
+        # the button stays in view below the scrolling preview, however short the pane
+        self.queue_btn = Gtk.Button(label="Add to queue", halign=Gtk.Align.CENTER,
+                                    margin_top=6, margin_bottom=10)
         self.queue_btn.add_css_class("pill")
         self.queue_btn.add_css_class("suggested-action")
         self.queue_btn.connect("clicked", lambda *_: self.run())
-        left.append(self.queue_btn)
-        lscroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, child=left)
-        paned.set_start_child(lscroll)
+        lscroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, child=left,
+                                     vexpand=True)
+        lcol = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        lcol.append(lscroll)
+        lcol.append(self.queue_btn)
+        paned.set_start_child(lcol)
 
         # ---------------- right: the form
         form = Adw.PreferencesPage()
@@ -146,6 +155,8 @@ class EditPage(Gtk.Box):
         self.speedp.set_key("balanced")
         self.gpu = Adw.SwitchRow(title="Use GPU (NVENC)",
                                  subtitle="Much faster; slightly larger files at equal quality")
+        self.gpu.set_active(self.ctx.settings.gpu)
+        self.gpu.connect("notify::active", lambda *_: self._remember_gpu())
         self.target = Adw.ExpanderRow(title="Target file size",
                                       subtitle="Pick the bitrate that lands on a size instead "
                                                "of a quality level")
@@ -313,6 +324,18 @@ class EditPage(Gtk.Box):
 
         self._format_changed()
 
+    def narrow_setters(self, bp: Adw.Breakpoint, short: bool = False):
+        """Below ~1200 px the preview stacks above the form, with a smaller player so the
+        form keeps most of the height (and less of it again in a short window)."""
+        bp.add_setter(self.paned, "orientation", Gtk.Orientation.VERTICAL)
+        bp.add_setter(self.paned, "position", 220 if short else 330)
+        bp.add_setter(self.player.video, "height-request", 100 if short else 150)
+
+    def _remember_gpu(self):
+        if self.ctx.settings.gpu != self.gpu.get_active():
+            self.ctx.settings.gpu = self.gpu.get_active()
+            self.ctx.settings.save()
+
     # ================================================================== reacting
     def _changed(self, *_):
         if self._applying:
@@ -394,6 +417,18 @@ class EditPage(Gtk.Box):
             sh = values.get("scale_height", 0)
             self.resize.set_key(str(sh))
             self.bake.set_active(values.get("bake_rotation", True))
+            # flag-only rotation cannot combine with re-encoding presets
+            self.lossless.set_active(False)
+            if key == "remux":
+                # a lossless remux: clear every edit that would force a re-encode
+                self.rot.set_active_name("0")
+                for sw in (self.hflip, self.vflip, self.deint, self.stab, self.denoise,
+                           self.norm, self.t_exact):
+                    sw.set_active(False)
+                self.crop.set_enable_expansion(False)
+                self.vol.set_value(0)
+                self.fps.set_key("0")
+                self.speed.set_key("1")
         finally:
             self._applying = False
         self._sync_visibility()
@@ -419,7 +454,19 @@ class EditPage(Gtk.Box):
             return False
         if tm and abs(self.target_mb.get_value() - tm) > 1e-6:
             return False
+        if key == "remux" and self._edits_pixels():
+            return False      # it promises a lossless remux; edits force a re-encode
         return True
+
+    def _edits_pixels(self) -> bool:
+        return bool(self.rot.get_active_name() not in (None, "0") or self.hflip.get_active()
+                    or self.vflip.get_active() or self.crop.get_enable_expansion()
+                    or self.resize.get_key() != "0" or self.fps.get_key() != "0"
+                    or self.speed.get_key() != "1" or self.deint.get_active()
+                    or self.stab.get_active() or self.denoise.get_active()
+                    or self.lossless.get_active() or self.norm.get_active()
+                    or self.vol.get_value() != 0
+                    or (self.trim.get_enable_expansion() and self.t_exact.get_active()))
 
     # ================================================================== recipe
     def recipe(self) -> Recipe:
@@ -525,6 +572,8 @@ class EditPage(Gtk.Box):
 
     def _load_player(self):
         if not self.get_mapped():
+            if self.player.path and self.player.path not in {i.path for i in self.items}:
+                self.player.load(None)       # removed from the selection: let the file go
             return
         first = next((i for i in self.items if i.ready and i.info.has_video), None)
         self.player.load(first.path if first else None)
@@ -540,7 +589,7 @@ class EditPage(Gtk.Box):
                 errors.append(f"{it.name}: {'still reading' if it.state == 'probing' else it.error}")
                 continue
             try:
-                p = ops.build(it.info, r, self.ctx.settings.out_dir, self.ctx.encoders, taken)
+                p = ops.build(it.info, r, self.ctx.out_dir, self.ctx.encoders, taken)
             except PlanError as e:
                 errors.append(f"{it.name}: {e}")
                 continue
@@ -564,6 +613,15 @@ class EditPage(Gtk.Box):
             lines = list(p.summary)
             if p.expect.duration:
                 lines.append(f"Result length {fmt_duration(p.expect.duration)}")
+            if len(plans) > 1 and any(q.summary != p.summary for q in plans[1:]):
+                copied = sum(1 for q in plans if _copies_video(q))
+                kinds = []
+                if copied:
+                    kinds.append(f"{copied} copied losslessly")
+                if len(plans) - copied:
+                    kinds.append(f"{len(plans) - copied} re-encoded")
+                lines.insert(0, f"Shown for {os.path.basename(p.inputs[0].path)}; the clips "
+                                f"differ ({', '.join(kinds)})")
             self.summary.set_label("\n".join("• " + s for s in lines))
             self.summary.set_visible(True)
         else:
@@ -592,7 +650,11 @@ class EditPage(Gtk.Box):
         if plans:
             self.ctx.toast(f"Queued {len(plans)} job{'s' if len(plans) != 1 else ''}")
             self.ctx.show_queue()
-        self._schedule()
+            # a double click must not queue everything twice
+            self.queue_btn.set_sensitive(False)
+            GLib.timeout_add(700, lambda: self._schedule() and False)
+        else:
+            self._schedule()
 
     # ================================================================== helpers
     def _mark(self, start: bool):

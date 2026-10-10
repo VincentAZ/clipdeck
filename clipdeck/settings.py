@@ -37,9 +37,14 @@ class Settings:
                 raw = json.load(f)
         except (OSError, ValueError):
             return cls()
+        if not isinstance(raw, dict):
+            return cls()
         s = cls()
         for f in fields(cls):
-            if f.name in raw and isinstance(raw[f.name], type(getattr(s, f.name))):
+            v = raw.get(f.name)
+            # bool is an int subclass: never let true/false stand in for a number
+            if isinstance(v, type(getattr(s, f.name))) and \
+                    isinstance(v, bool) == isinstance(getattr(s, f.name), bool):
                 setattr(s, f.name, raw[f.name])
         s.workers = min(4, max(1, s.workers))
         if s.output_mode not in ("beside", "folder"):
