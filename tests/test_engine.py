@@ -1201,5 +1201,37 @@ class ThirdReviewTests(Base):
         self.assertEqual([j.state for j in jobs], [DONE, DONE])
 
 
+class LosslessFrameRateTests(Base):
+    def test_retime_preserves_video_and_syncs_audio(self):
+        for name, fps in (("upright.mp4", 24), ("phone.mp4", 60),
+                          ("silent60.mp4", 23.976), ("hevc.mp4", 25)):
+            with self.subTest(name=name, fps=fps):
+                plan = self.build(name, fps=fps, fps_lossless=True)
+                self.assertEqual(plan.expect.video_md5_from, src(name))
+                self.assertEqual(plan.expect.frames_from, src(name))
+                result = self.run_plan(plan)
+                info = probe(result.output)
+                self.assertAlmostEqual(info.fps, float(ops.Fraction(ops.rate_expr(fps))), delta=0.01)
+                self.assertEqual(runner.count_frames(result.output), runner.count_frames(src(name)))
+                if info.has_audio:
+                    self.assertAlmostEqual(info.audio_duration, info.video_duration, delta=0.15)
+
+    def test_reject_incompatible_edits(self):
+        for kw in (dict(crop=(100, 100, 0, 0)), dict(speed=2), dict(trim_start=1),
+                   dict(cfr=True), dict(vcodec="h264"), dict(fmt="mkv"),
+                   dict(target_mb=1), dict(acodec="copy"), dict(fps=0)):
+            with self.subTest(kw=kw), self.assertRaises(PlanError):
+                self.build("upright.mp4", **(dict(fps=24, fps_lossless=True) | kw))
+        with self.assertRaises(PlanError):
+            self.build("vfr.mp4", fps=24, fps_lossless=True)
+
+    def test_wrong_rate_fails_verification(self):
+        plan = self.build("silent60.mp4", fps=30, fps_lossless=True)
+        plan.expect.fps = 25
+        result = self.run_plan(plan, expect_ok=False)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("frame rate" in f for f in result.failures))
+
+
 if __name__ == "__main__":
     unittest.main()

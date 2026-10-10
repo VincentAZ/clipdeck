@@ -133,6 +133,20 @@ def scenario(app, win):
     page("edit")
     e = win.edit
     yield 1.0
+    # Lossless frame-rate mode reaches the engine and completes through the queue.
+    e.fps.set_key("24")
+    e.fps_lossless.set_active(True)
+    yield 0.5
+    check(e.queue_btn.get_sensitive(), e.error.get_label())
+    check("lossless video" in e.summary.get_label(), e.summary.get_label())
+    e.queue_btn.emit("clicked")
+    yield idle()
+    job = win.queue.jobs[-1]
+    check(job.state == DONE, f"lossless frame rate: {job.result.failures if job.result else ''}")
+    check(abs(probe(job.result.output).fps - 24) < 0.01, "lossless output rate")
+    e.fps_lossless.set_active(False)
+    e.fps.set_key("0")
+    page("edit")
     from clipdeck.ui.edit import PRESETS
     for key, _label, _v in PRESETS:
         e.preset.set_key(key)

@@ -323,13 +323,18 @@ class EditPage(Gtk.Box):
         self.resize_w.set_title("Width (px)")
         self.resize_w.set_value(1280)
         self.fps = KeyCombo("Frame rate", FPS)
+        self.fps_lossless = Adw.SwitchRow(
+            title="Change frame rate: lossless video",
+            subtitle="Keeps every frame; changes speed and duration. "
+                     "Audio is re-encoded to stay in sync. MP4/MOV only.")
+        self.fps_lossless.connect("notify::active", ch)
         self.speed = KeyCombo("Speed", SPEED)
         self.speed.set_key("1")
         self.resize.connect("notify::selected", lambda *_: self._sync_visibility())
         for w in (self.resize, self.fps, self.speed):
             w.connect("notify::selected", ch)
         self.resize_w.connect("notify::value", ch)
-        for w in (self.resize, self.resize_w, self.fps, self.speed):
+        for w in (self.resize, self.resize_w, self.fps, self.fps_lossless, self.speed):
             self.size_group.add(w)
 
         # clean up
@@ -428,6 +433,7 @@ class EditPage(Gtk.Box):
         self.resize.set_visible(video)
         self.resize_w.set_visible(video and self.resize.get_key() == "custom")
         self.fps.set_visible(video)
+        self.fps_lossless.set_visible(video)
         self.audio_group.set_visible(f.kind in ("video", "audio"))
         self.mute.set_visible(video)
         lossless = self.lossless.get_active()
@@ -471,6 +477,7 @@ class EditPage(Gtk.Box):
                 self.crop.set_enable_expansion(False)
                 self.vol.set_value(0)
                 self.fps.set_key("0")
+                self.fps_lossless.set_active(False)
                 self.speed.set_key("1")
         finally:
             self._applying = False
@@ -554,6 +561,7 @@ class EditPage(Gtk.Box):
                 r.cfr = True
             elif fk != "0":
                 r.fps = float(fk)
+            r.fps_lossless = self.fps_lossless.get_active()
             r.remove_audio = self.mute.get_active()
         r.speed = float(self.speed.get_key() or 1)
         if f.kind in ("video", "audio"):

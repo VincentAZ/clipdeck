@@ -4,12 +4,14 @@ what the output must look like for verification to pass)."""
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import subprocess
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from fractions import Fraction
 
 from .media import MediaInfo, normalize_rotation
 
@@ -116,6 +118,7 @@ class Recipe:
     scale_height: int = 0
     scale_width: int = 0
     fps: float = 0.0                # 0 keeps source rate
+    fps_lossless: bool = False       # retime copied video; audio follows at the new speed
     cfr: bool = False               # force constant frame rate at source rate
     speed: float = 1.0
     deinterlace: bool = False
@@ -133,7 +136,8 @@ class Recipe:
 
     def has_video_filters(self) -> bool:
         return bool(self.rotate or self.hflip or self.vflip or self.crop or self.scale_height
-                    or self.scale_width or self.fps or self.cfr or self.speed != 1.0
+                    or self.scale_width or (self.fps and not self.fps_lossless) or self.cfr
+                    or (self.speed != 1.0 and not self.fps_lossless)
                     or self.deinterlace or self.stabilize or self.denoise)
 
     def has_audio_filters(self) -> bool:
@@ -163,6 +167,7 @@ class Expect:
     duration: float = 0.0
     dur_tol: float = 0.1
     min_duration: float | None = None
+    fps: float = 0.0                 # expected average rate, when explicitly verified
     frames: int | None = None         # exact frame count, None = do not check
     frames_from: str = ""             # count frames of this file and compare
     video_md5_from: str = ""
@@ -591,6 +596,23 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
         raise PlanError("Rotation must be 0, 90, 180 or 270 degrees")
     if fmt.kind in ("video", "gif") and info.is_image_seq:
         raise PlanError(f"{info.name} is a still image, not a video")
+    if r.fps_lossless:
+        if fmt.key not in ("mp4", "mov"):
+            raise PlanError("Lossless frame-rate changes need MP4 or MOV output")
+        if not math.isfinite(r.fps) or not 1 <= r.fps <= 240 or r.cfr:
+            raise PlanError("Choose a specific frame rate for a lossless frame-rate change")
+        if not info.is_exact_cfr or not info.fps or info.preroll or info.container == "avi":
+            raise PlanError("Lossless frame-rate changes need a constant-rate source "
+                            "with reliable timestamps")
+        if (r.trimmed() or r.rotate_lossless or r.speed != 1 or r.target_mb
+                or r.has_video_filters()):
+            raise PlanError("Turn off trimming, speed, target size and other video edits "
+                            "for a lossless frame-rate change")
+        if r.vcodec not in ("auto", "copy"):
+            raise PlanError("Choose Automatic or Copy video for a lossless frame-rate change")
+        # Copy preserves orientation/HDR/SAR. Only packet timestamps change.
+        target_rate = float(Fraction(rate_expr(r.fps)))
+        r = replace(r, vcodec="copy", bake_rotation=False, speed=target_rate / info.fps)
     if fmt.kind == "gif":
         return _build_gif(info, r, out_dir, taken, title)
 
@@ -829,6 +851,18 @@ def build(info: MediaInfo, r: Recipe, out_dir: str | None = None,
                            f"{' (GPU)' if venc.endswith('_nvenc') else ''}, {ow}×{oh}")
         else:
             argv += ["-c:v", "copy"]
+            if r.fps_lossless:
+                factor = 1 / r.speed
+                # Keep the demuxer time base; -r would round B-frame timestamps
+                # before this filter and can change the resulting average rate.
+                argv += ["-bsf:v", f"setts=pts=PTS*{factor:.12g}:"
+                         f"dts=DTS*{factor:.12g}:duration=DURATION*{factor:.12g}"]
+                expect.fps = target_rate
+                expect.frames_from = info.path
+                summary.append(f"Frame rate: {info.fps:.6g} → {rate_expr(r.fps)} fps "
+                               "(lossless video; every frame kept)")
+                if keep_audio and r.speed != 1:
+                    summary.append("Audio is re-encoded to follow the new playback speed")
             if info.vcodec == "hevc" and fmt.ext in ("mp4", "mov"):
                 argv += ["-tag:v", "hvc1"]
             expect.width, expect.height = info.width, info.height

@@ -47,6 +47,13 @@ at the current scrub position, using the configured output folder. Pixel dimensi
 and aspect ratio appear beside the control. In Edit & Convert, the image includes
 the enabled crop, and its displayed dimensions and ratio update as you adjust it.
 
+**Lossless frame-rate changes:** in Edit & Convert → Size and timing, choose a
+specific frame rate and enable **Change frame rate: lossless video**. This keeps
+every compressed video frame and changes playback speed and duration (for example,
+60 → 30 fps takes twice as long). Audio is re-encoded to stay in sync. Use Automatic
+or Copy video with MP4/MOV output and a constant-rate source; turn off other video
+edits and trimming. The original frame-rate mode keeps the duration and re-encodes.
+
 Keyboard: <kbd>Ctrl</kbd>+<kbd>O</kbd> add videos, <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>5</kbd>
 switch pages, <kbd>Delete</kbd> (in the library list) removes clips from the library
 (files are not touched), <kbd>Ctrl</kbd>+<kbd>,</kbd> preferences, <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit.

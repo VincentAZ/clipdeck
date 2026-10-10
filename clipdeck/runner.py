@@ -302,6 +302,8 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
         return [f"output is unreadable ({e})"], warns
 
     if ex.kind in ("video", "gif", "image"):
+        if ex.fps and abs(info.fps - ex.fps) > max(0.01, ex.fps * 0.001):
+            fails.append(f"frame rate {info.fps:.6g} ≠ {ex.fps:.6g} fps")
         if info.vcodec != ex.vcodec:
             fails.append(f"video codec {info.vcodec or 'none'} ≠ {ex.vcodec}")
         if (info.width, info.height) != (ex.width, ex.height):
