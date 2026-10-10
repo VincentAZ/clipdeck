@@ -13,6 +13,7 @@ from ..media import fmt_duration, parse_time
 from ..ops import (ACODEC_LABELS, FORMATS, QUALITY_LABELS, QUALITY_LEVELS, SPEED_LABELS, SPEEDS,
                    VCODEC_LABELS, PlanError, Recipe)
 from .library import MediaItem
+from .crop import CropOverlay
 from .trim import TrimTimeline
 from .widgets import KeyCombo, Player, fmt_time_entry
 
@@ -89,7 +90,11 @@ class EditPage(Gtk.Box):
         left.set_size_request(340, -1)
         self.player = Player(height=120)
         preview = Gtk.AspectFrame(ratio=16 / 9, obey_child=False)
-        preview.set_child(self.player)
+        overlay = Gtk.Overlay(child=self.player)
+        self.crop_overlay = CropOverlay(self._set_crop)
+        self.crop_overlay.set_visible(False)
+        overlay.add_overlay(self.crop_overlay)
+        preview.set_child(overlay)
         left.append(preview)
         self.trim_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         left.append(self.trim_panel)
@@ -273,7 +278,9 @@ class EditPage(Gtk.Box):
             self.geo_group.add(w)
 
         # crop
-        self.crop_group = Adw.PreferencesGroup(title="Crop")
+        self.crop_group = Adw.PreferencesGroup(
+            title="Crop", description="Enable crop, then drag the preview corners to resize "
+                                      "or drag inside to move the selection.")
         page.add(self.crop_group)
         self.crop = Adw.ExpanderRow(title="Crop", subtitle="Pixels of the upright picture")
         self.crop.set_show_enable_switch(True)
@@ -299,6 +306,9 @@ class EditPage(Gtk.Box):
             box.append(b)
         tools.add_suffix(box)
         self.crop.add_row(tools)
+        self.reset_crop = Gtk.Button(label="Reset", tooltip_text="Keep the whole picture")
+        self.reset_crop.connect("clicked", self._reset_crop)
+        self.crop_group.set_header_suffix(self.reset_crop)
         self.crop.connect("notify::enable-expansion", ch)
         self.crop_group.add(self.crop)
 
@@ -422,6 +432,7 @@ class EditPage(Gtk.Box):
         has_player = self.player.path is not None
         self.player.set_visible(has_player)
         self._sync_trim()
+        self._sync_crop()
 
     # ================================================================== presets
     def _apply_preset(self):
@@ -788,6 +799,24 @@ class EditPage(Gtk.Box):
 
     def _first_info(self):
         return next((i.info for i in self.items if i.ready and i.info.has_video), None)
+
+    def _reset_crop(self, *_):
+        info = self._first_info()
+        if info:
+            w, h = info.display_size
+            self._set_crop(w - w % 2, h - h % 2, 0, 0)
+        self.crop.set_enable_expansion(False)
+
+    def _sync_crop(self):
+        info = self._first_info()
+        visual = FORMATS[self.fmt.get_key() or "mp4"].kind in ("video", "gif")
+        enabled = self.crop.get_enable_expansion()
+        self.crop_overlay.set_visible(visual and info is not None and enabled)
+        self.reset_crop.set_sensitive(enabled)
+        self.crop_overlay.source = info.display_size if info else (0, 0)
+        values = tuple(int(row.get_value()) for row in (self.c_w, self.c_h, self.c_x, self.c_y))
+        self.crop_overlay.crop = values
+        self.crop_overlay.queue_draw()
 
     def _aspect(self, ratio: float):
         info = self._first_info()
