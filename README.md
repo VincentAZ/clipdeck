@@ -42,6 +42,11 @@ the window, and Clipdeck appears in *Open With* for video files.
 Preferences: output next to originals or in one folder, thorough verification, jobs
 in parallel.
 
+**Save frame (PNG)** below the Inspect and Edit & Convert previews saves an image
+at the current scrub position, using the configured output folder. Pixel dimensions
+and aspect ratio appear beside the control. In Edit & Convert, the image includes
+the enabled crop, and its displayed dimensions and ratio update as you adjust it.
+
 Keyboard: <kbd>Ctrl</kbd>+<kbd>O</kbd> add videos, <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>5</kbd>
 switch pages, <kbd>Delete</kbd> (in the library list) removes clips from the library
 (files are not touched), <kbd>Ctrl</kbd>+<kbd>,</kbd> preferences, <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit.

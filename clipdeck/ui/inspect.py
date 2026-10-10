@@ -6,6 +6,7 @@ from gi.repository import Adw, GLib, Gtk
 
 from ..media import fmt_bitrate, fmt_duration, fmt_size
 from .library import ERROR, PROBING, MediaItem
+from .frame import FrameActions
 from .widgets import Player, clear_group, plain_row
 
 
@@ -29,6 +30,11 @@ class InspectPage(Gtk.Box):
         self.player.set_margin_end(12)
         self.player.set_margin_top(12)
         single.append(self.player)
+        self.frame_actions = FrameActions(ctx, self.player)
+        self.frame_actions.set_margin_start(12)
+        self.frame_actions.set_margin_end(12)
+        self.frame_actions.set_margin_top(8)
+        single.append(self.frame_actions)
         self.details = Adw.PreferencesPage()
         self.details.set_vexpand(True)
         single.append(self.details)
@@ -51,6 +57,8 @@ class InspectPage(Gtk.Box):
 
     def refresh(self):
         items = self.items
+        first = items[0] if len(items) == 1 and items[0].ready else None
+        self.frame_actions.set_media(first.info if first else None)
         if not items:
             self.stack.set_visible_child_name("empty")
             self.player.load(None)

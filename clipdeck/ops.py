@@ -1203,7 +1203,8 @@ def build_merge(infos: list[MediaInfo], r: Recipe, out_dir: str | None = None,
 
 
 def build_snapshot(info: MediaInfo, at: float, ext: str = "png", out_dir: str | None = None,
-                   taken: set[str] | None = None) -> Plan:
+                   taken: set[str] | None = None,
+                   crop: tuple[int, int, int, int] | None = None) -> Plan:
     if not info.has_video:
         raise PlanError(f"{info.name} has no video")
     if ext not in ("png", "jpg"):
@@ -1219,8 +1220,17 @@ def build_snapshot(info: MediaInfo, at: float, ext: str = "png", out_dir: str | 
     w, h = info.display_size
     argv = list(COMMON) + ["-ss", f"{at:.6f}", "-i", info.path, "-map", "0:v:0",
                            "-frames:v", "1", "-update", "1"]
+    filters = []
     if info.sar != 1:
-        argv += ["-vf", f"scale={w}:{h},setsar=1"]
+        filters.append(f"scale={w}:{h},setsar=1")
+    if crop is not None:
+        cw, ch, cx, cy = crop
+        if cw <= 0 or ch <= 0 or cx < 0 or cy < 0 or cx + cw > w or cy + ch > h:
+            raise PlanError(f"Crop {cw}×{ch} at {cx},{cy} does not fit inside the {w}×{h} frame")
+        filters.append(f"crop={cw}:{ch}:{cx}:{cy}:exact=1")
+        w, h = cw, ch
+    if filters:
+        argv += ["-vf", ",".join(filters)]
     if ext == "jpg":
         argv += ["-q:v", "2"]
     argv.append(tmp)

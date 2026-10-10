@@ -395,6 +395,19 @@ class CropUITest(unittest.TestCase):
         self.assertEqual(noisy, [], "\n".join(noisy[:20]))
 
 
+class FrameUITest(unittest.TestCase):
+    def test_save_scrubbed_frame(self):
+        if not shutil.which("xvfb-run"):
+            self.skipTest("xvfb-run not installed")
+        res = subprocess.run(["xvfb-run", "-a", "-s", "-screen 0 1600x1000x24",
+                              sys.executable, "-m", "tests.test_frame"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=90)
+        self.assertEqual(res.returncode, 0, res.stderr[-6000:])
+        noisy = [line for line in res.stderr.splitlines()
+                 if ("-WARNING" in line or "-CRITICAL" in line) and "DRI3" not in line]
+        self.assertEqual(noisy, [], "\n".join(noisy[:20]))
+
+
 def main() -> int:
     sys.path.insert(0, ROOT)
     from tests.ui_harness import run

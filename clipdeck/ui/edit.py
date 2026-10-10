@@ -14,6 +14,7 @@ from ..ops import (ACODEC_LABELS, FORMATS, QUALITY_LABELS, QUALITY_LEVELS, SPEED
                    VCODEC_LABELS, PlanError, Recipe)
 from .library import MediaItem
 from .crop import CropOverlay
+from .frame import FrameActions
 from .trim import TrimTimeline
 from .widgets import KeyCombo, Player, fmt_time_entry
 
@@ -96,6 +97,8 @@ class EditPage(Gtk.Box):
         overlay.add_overlay(self.crop_overlay)
         preview.set_child(overlay)
         left.append(preview)
+        self.frame_actions = FrameActions(ctx, self.player)
+        left.append(self.frame_actions)
         self.trim_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         left.append(self.trim_panel)
         heading = Gtk.Box(spacing=8)
@@ -817,6 +820,7 @@ class EditPage(Gtk.Box):
         values = tuple(int(row.get_value()) for row in (self.c_w, self.c_h, self.c_x, self.c_y))
         self.crop_overlay.crop = values
         self.crop_overlay.queue_draw()
+        self.frame_actions.set_media(info, values if visual and enabled else None)
 
     def _aspect(self, ratio: float):
         info = self._first_info()

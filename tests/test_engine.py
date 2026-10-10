@@ -470,6 +470,21 @@ class MergeStillTests(Base):
         with self.assertRaises(PlanError):
             ops.build_snapshot(probe(src("upright.mp4")), 99)
 
+    def test_snapshot_crop(self):
+        for name in ("phone.mp4", "anamorphic.mp4"):
+            with self.subTest(name=name):
+                plan = ops.build_snapshot(probe(src(name)), 0.5, out_dir=self.out,
+                                          crop=(21, 19, 1, 1))
+                result = self.run_plan(plan)
+                image = probe(result.output)
+                self.assertEqual((image.width, image.height), (21, 19))
+
+    def test_snapshot_crop_out_of_bounds(self):
+        info = probe(src("upright.mp4"))
+        for crop in ((100, 100, 300, 0), (0, 10, 0, 0), (10, 10, -1, 0)):
+            with self.subTest(crop=crop), self.assertRaises(PlanError):
+                ops.build_snapshot(info, 0.5, crop=crop)
+
     def test_contact_sheet(self):
         plan = ops.build_contact_sheet(probe(src("long.mp4")), 3, 2, 200, out_dir=self.out)
         res = self.run_plan(plan)
