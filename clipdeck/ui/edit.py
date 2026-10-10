@@ -13,6 +13,7 @@ from ..media import fmt_duration, parse_time
 from ..ops import (ACODEC_LABELS, FORMATS, QUALITY_LABELS, QUALITY_LEVELS, SPEED_LABELS, SPEEDS,
                    VCODEC_LABELS, PlanError, Recipe)
 from .library import MediaItem
+from .trim import TrimTimeline
 from .widgets import KeyCombo, Player, fmt_time_entry
 
 PRESETS: list[tuple[str, str, dict]] = [
@@ -86,16 +87,36 @@ class EditPage(Gtk.Box):
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_start=12,
                        margin_end=12, margin_top=12, margin_bottom=12)
         left.set_size_request(340, -1)
-        self.player = Player(height=240)
-        left.append(self.player)
-        marks = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
-        self.mark_in = Gtk.Button(label="Set start here", tooltip_text="Trim start = player position")
-        self.mark_out = Gtk.Button(label="Set end here", tooltip_text="Trim end = player position")
-        self.mark_in.connect("clicked", lambda *_: self._mark(True))
-        self.mark_out.connect("clicked", lambda *_: self._mark(False))
-        marks.append(self.mark_in)
-        marks.append(self.mark_out)
-        left.append(marks)
+        self.player = Player(height=120)
+        preview = Gtk.AspectFrame(ratio=16 / 9, obey_child=False)
+        preview.set_child(self.player)
+        left.append(preview)
+        self.trim_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        left.append(self.trim_panel)
+        heading = Gtk.Box(spacing=8)
+        title = Gtk.Label(label="Trim clip", xalign=0, hexpand=True)
+        title.add_css_class("heading")
+        heading.append(title)
+        self.reset_trim = Gtk.Button(label="Reset", tooltip_text="Keep the whole clip")
+        self.reset_trim.add_css_class("flat")
+        self.reset_trim.connect("clicked", self._reset_trim)
+        heading.append(self.reset_trim)
+        self.trim_panel.append(heading)
+        hint = Gtk.Label(label="Drag the handles to keep the part you want.", xalign=0, wrap=True)
+        hint.add_css_class("dim-label")
+        self.trim_panel.append(hint)
+        self.timeline = TrimTimeline(self._range_changed, self._seek_trim)
+        self.trim_panel.append(self.timeline)
+        transport = Gtk.Box(spacing=6)
+        self.preview_trim = Gtk.Button(label="Preview selection")
+        self.preview_trim.connect("clicked", self._preview_trim)
+        transport.append(self.preview_trim)
+        self.trim_length = Gtk.Label(xalign=1, hexpand=True)
+        self.trim_length.add_css_class("caption")
+        transport.append(self.trim_length)
+        self.trim_panel.append(transport)
+        self._previewing = False
+        self.add_tick_callback(self._trim_tick)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         card.add_css_class("card")
@@ -130,6 +151,7 @@ class EditPage(Gtk.Box):
         self._build_form(form)
 
         self.connect("map", lambda *_: self._load_player())
+        self.connect("unmap", self._stop_trim_preview)
         self.connect("unmap", lambda *_: self.player.pause())
         self._sync_visibility()
 
@@ -197,19 +219,27 @@ class EditPage(Gtk.Box):
         self.gif_group.add(self.gif_pal)
 
         # trim
-        g = Adw.PreferencesGroup(title="Trim")
-        page.add(g)
-        self.trim = Adw.ExpanderRow(title="Trim", subtitle="Keep only part of the clip")
+        g = Adw.PreferencesGroup()
+        self.trim = Adw.ExpanderRow(title="Trim options", subtitle="Enable trim / choose cut accuracy")
         self.trim.set_show_enable_switch(True)
         self.trim.set_enable_expansion(False)
-        self.t_start = Adw.EntryRow(title="Start (e.g. 0:05 or 5.5)")
-        self.t_end = Adw.EntryRow(title="End (blank = to the end)")
+        self.t_start = Gtk.Entry(hexpand=True, width_chars=10, placeholder_text="0:00.000")
+        self.t_end = Gtk.Entry(hexpand=True, width_chars=10, placeholder_text="Clip end")
         self.t_exact = Adw.SwitchRow(title="Frame-accurate",
                                      subtitle="Off: cut on keyframes without re-encoding (instant, lossless)")
         self.t_exact.set_active(True)
-        for w in (self.t_start, self.t_end):
-            w.connect("changed", ch)
-            self.trim.add_row(w)
+        times = Gtk.Box(spacing=12, homogeneous=True)
+        for w, label in ((self.t_start, "Start"), (self.t_end, "End")):
+            field = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            caption = Gtk.Label(label=label, xalign=0, mnemonic_widget=w)
+            caption.add_css_class("caption")
+            field.append(caption)
+            field.append(w)
+            w.set_tooltip_text(label + " time, e.g. 0:05.500")
+            w.connect("changed", self._trim_entry_changed)
+            times.append(field)
+        self.trim_panel.append(times)
+        self.trim_panel.append(g)
         self.t_exact.connect("notify::active", ch)
         self.trim.add_row(self.t_exact)
         self.trim.connect("notify::enable-expansion", ch)
@@ -328,7 +358,7 @@ class EditPage(Gtk.Box):
         """Below ~1200 px the preview stacks above the form, with a smaller player so the
         form keeps most of the height (and less of it again in a short window)."""
         bp.add_setter(self.paned, "orientation", Gtk.Orientation.VERTICAL)
-        bp.add_setter(self.paned, "position", 220 if short else 330)
+        bp.add_setter(self.paned, "position", 360 if short else 560)
         bp.add_setter(self.player.video, "height-request", 100 if short else 150)
 
     def _remember_gpu(self):
@@ -391,8 +421,7 @@ class EditPage(Gtk.Box):
         self.bake.set_sensitive(not lossless)
         has_player = self.player.path is not None
         self.player.set_visible(has_player)
-        self.mark_in.set_visible(has_player)
-        self.mark_out.set_visible(has_player)
+        self._sync_trim()
 
     # ================================================================== presets
     def _apply_preset(self):
@@ -662,6 +691,100 @@ class EditPage(Gtk.Box):
         self.trim.set_enable_expansion(True)
         self.trim.set_expanded(True)
         (self.t_start if start else self.t_end).set_text(fmt_time_entry(pos))
+
+    def _trim_entry_changed(self, *_):
+        if not self._applying:
+            self.trim.set_enable_expansion(True)
+            self._changed()
+
+    def _sync_trim(self):
+        if not hasattr(self, "t_end"):
+            return
+        info = self._first_info()
+        duration = info.duration if info else 0
+        self.timeline.duration = duration
+        self.timeline.step = 1 / (info.fps or 30) if info else 1 / 30
+        start, end = 0, duration
+        valid = duration > 0
+        if self.trim.get_enable_expansion():
+            try:
+                start = parse_time(self.t_start.get_text()) if self.t_start.get_text().strip() else 0
+                end = parse_time(self.t_end.get_text()) if self.t_end.get_text().strip() else duration
+                valid = valid and 0 <= start < end <= duration
+            except ValueError:
+                valid = False
+        self.timeline.start = max(0, min(duration, start))
+        self.timeline.end = max(self.timeline.start, min(duration, end))
+        self.timeline.set_sensitive(duration > 0)
+        self.timeline.queue_draw()
+        self.preview_trim.set_sensitive(valid and self.player.path is not None)
+        text = f"Keep {fmt_time_entry(end - start)}" if valid else "Check trim times"
+        if len(self.items) > 1:
+            text += f" · {len(self.items)} clips"
+        self.trim_length.set_label(text)
+        self._stop_trim_preview()
+
+    def _range_changed(self, start, end):
+        self._applying = True
+        try:
+            self.trim.set_enable_expansion(True)
+            self.t_start.set_text(fmt_time_entry(start))
+            self.t_end.set_text("" if end >= self.timeline.duration else fmt_time_entry(end))
+            self.trim.set_expanded(False)
+        finally:
+            self._applying = False
+        self._changed()
+
+    def _reset_trim(self, *_):
+        self._applying = True
+        try:
+            self.trim.set_enable_expansion(False)
+            self.t_start.set_text("")
+            self.t_end.set_text("")
+        finally:
+            self._applying = False
+        self._seek_trim(0)
+        self._changed()
+
+    def _stop_trim_preview(self, *_):
+        if self._previewing:
+            self.player.pause()
+        self._previewing = False
+        self.preview_trim.set_label("Preview selection")
+
+    def _seek_trim(self, seconds):
+        self._stop_trim_preview()
+        self.player.pause()
+        self.player.seek(seconds)
+        self.timeline.position = seconds
+        self.timeline.queue_draw()
+
+    def _preview_trim(self, *_):
+        if self._previewing:
+            self._stop_trim_preview()
+            return
+        stream = self.player.video.get_media_stream()
+        if stream is None or not stream.is_seekable():
+            self.ctx.toast("The video is still loading. Try again in a moment.")
+            return
+        self.player.seek(self.timeline.start)
+        self._previewing = True
+        self._preview_pending_seek = True
+        self.preview_trim.set_label("Stop preview")
+        stream.play()
+
+    def _trim_tick(self, *_):
+        self.timeline.position = self.player.position()
+        if self._previewing:
+            # Ignore the previous timestamp until the asynchronous seek completes.
+            stream = self.player.video.get_media_stream()
+            if self._preview_pending_seek:
+                if stream is not None and not stream.is_seeking():
+                    self._preview_pending_seek = False
+            elif self.timeline.position >= self.timeline.end or stream is None or not stream.get_playing():
+                self._stop_trim_preview()
+        self.timeline.queue_draw()
+        return True
 
     def _first_info(self):
         return next((i.info for i in self.items if i.ready and i.info.has_video), None)
