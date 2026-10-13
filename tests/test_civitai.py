@@ -72,7 +72,8 @@ def scenario(app, win):
     assert len(win.queue.jobs) == 3, "MiniMax H3 doesn't tag a picture"
     t.t_model.set_key("krea-2-raw")
     before = pngtags.picture(picture)
-    assert t._on_tag_drop(None, files, 0, 0)
+    assert t.t_choose.get_visible(), "a button to choose pictures without dragging"
+    assert t.tag_paths([picture])           # what Choose videos or pictures… does
     yield Wait(lambda: len(win.queue.jobs) == 4 and win.queue.active_count() == 0, "picture", 30)
     job = win.queue.jobs[3]
     assert job.state == DONE, job.result.failures

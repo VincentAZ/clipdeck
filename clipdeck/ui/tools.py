@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 
-from gi.repository import Adw, Gdk, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .. import ops
 from ..media import fmt_duration, parse_time
@@ -105,9 +105,14 @@ class ToolsPage(Gtk.Box):
         drop.append(Gtk.Image(icon_name="folder-videos-symbolic", pixel_size=32,
                               margin_top=18, css_classes=["dim-label"]))
         self.t_drop_label = Gtk.Label(label="Drop videos or PNG pictures here to tag them",
-                                      margin_bottom=18, wrap=True,
-                                      justify=Gtk.Justification.CENTER)
+                                      wrap=True, justify=Gtk.Justification.CENTER)
         drop.append(self.t_drop_label)
+        # the library's Add Videos takes videos only: pictures come in here
+        self.t_choose = Gtk.Button(label="Choose videos or pictures…",
+                                   halign=Gtk.Align.CENTER, margin_bottom=18)
+        self.t_choose.add_css_class("pill")
+        self.t_choose.connect("clicked", lambda *_: self._choose_to_tag())
+        drop.append(self.t_choose)
         target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
         target.connect("drop", self._on_tag_drop)
         target.connect("enter", lambda *_: (drop.add_css_class("accent"), Gdk.DragAction.COPY)[1])
@@ -200,9 +205,37 @@ class ToolsPage(Gtk.Box):
             self.ctx.toast(f"Tagging {n} file{'s' if n != 1 else ''} for Civitai")
             self.ctx.show_queue()
 
+    def _choose_to_tag(self):
+        dlg = Gtk.FileDialog(title="Choose Videos or Pictures to Tag", modal=True)
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        f = Gtk.FileFilter(name="MP4/MOV videos and PNG pictures")
+        for pat in ("*.mp4", "*.MP4", "*.mov", "*.MOV", "*.m4v", "*.png", "*.PNG"):
+            f.add_pattern(pat)
+        filters.append(f)
+        dlg.set_filters(filters)
+        st = self.ctx.settings
+        if st.last_dir and os.path.isdir(st.last_dir):
+            dlg.set_initial_folder(Gio.File.new_for_path(st.last_dir))
+
+        def done(d, res):
+            try:
+                files = d.open_multiple_finish(res)
+            except GLib.Error:
+                return
+            paths = [files.get_item(i).get_path() for i in range(files.get_n_items())]
+            paths = [p for p in paths if p]
+            if paths:
+                st.last_dir = os.path.dirname(paths[0])
+                st.save()
+                self.tag_paths(paths)
+        dlg.open_multiple(self.get_root(), None, done)
+
     def _on_tag_drop(self, _target, value, _x, _y):
         self.t_drop.remove_css_class("accent")
-        paths = [f.get_path() for f in value.get_files() if f.get_path()]
+        return self.tag_paths([f.get_path() for f in value.get_files() if f.get_path()])
+
+    def tag_paths(self, paths):
+        """Tag these videos, PNG pictures and folders of them with the picked model."""
         pictures, others = [], 0
         for p in paths:
             found = ([os.path.join(r, f) for r, _d, fs in os.walk(p) for f in sorted(fs)]
