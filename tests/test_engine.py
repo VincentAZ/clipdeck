@@ -1233,5 +1233,55 @@ class LosslessFrameRateTests(Base):
         self.assertTrue(any("frame rate" in f for f in result.failures))
 
 
+class CivitaiTagTests(Base):
+    def tagged_source(self, ext="mp4"):
+        path = os.path.join(self.out, f"comfy.{ext}")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src("upright.mp4"), "-c", "copy",
+                        "-metadata", 'prompt={"6":{"inputs":{"text":"SECRET WORDS"}}}',
+                        "-metadata", "title=my title",
+                        *(["-movflags", "+use_metadata_tags"] if ext == "mp4" else []), path],
+                       check=True)
+        return path
+
+    def test_known_model_tags_only(self):
+        info = probe(self.tagged_source())
+        self.assertIn("prompt", info.tags)
+        plan = ops.build_civitai_tag(info, ops.civitai_tags("minimax-h3"), self.out)
+        res = self.run_plan(plan)
+        tags = probe(res.output).tags
+        self.assertEqual(tags["workflow"],
+                         '{"extra":{"airs":["urn:air:minimaxh3:checkpoint:civitai:2821932@3216500"]}}')
+        self.assertEqual(tags["prompt"], '{"1":{"inputs":{"unet_name":"minimax_h3_fl2va_pruned_int8_'
+                         'convrot.safetensors","weight_dtype":"default"},"class_type":"UNETLoader",'
+                         '"_meta":{"title":"Load Diffusion Model"}}}')
+        self.assertNotIn("title", tags)
+        self.assertNotIn(b"SECRET WORDS", read(res.output, "rb"))
+        self.assertTrue(res.output.endswith("comfy_civitai.mp4"))
+
+    def test_any_model_by_air(self):
+        info = probe(self.tagged_source())
+        air = "urn:air:ltxv23:checkpoint:civitai:2448150@2752717"
+        res = self.run_plan(ops.build_civitai_tag(info, ops.civitai_tags("other", air), self.out))
+        tags = probe(res.output).tags
+        self.assertIn(air, tags["workflow"])
+        self.assertNotIn("prompt", tags)
+        with self.assertRaises(PlanError):
+            ops.civitai_tags("other", "https://civitai.com/models/1")
+
+    def test_left_over_tag_fails_verification(self):
+        info = probe(self.tagged_source())
+        plan = ops.build_civitai_tag(info, ops.civitai_tags("minimax-h3"), self.out)
+        plan.steps[0].argv.remove("-1")              # keep the source's tags as well
+        plan.steps[0].argv.remove("-map_metadata")
+        res = self.run_plan(plan, expect_ok=False)
+        self.assertFalse(res.ok)
+        self.assertTrue(any("left over" in f for f in res.failures), res.failures)
+
+    def test_not_a_tag_container(self):
+        self.assertTrue(ops.build_civitai_tag(probe(src("stored_pcm.mov")),
+                                              ops.civitai_tags("minimax-h3"), self.out))
+        with self.assertRaises(PlanError):
+            ops.build_civitai_tag(probe(src("guv.mkv")), ops.civitai_tags("minimax-h3"), self.out)
+
 if __name__ == "__main__":
     unittest.main()

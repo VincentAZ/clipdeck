@@ -123,6 +123,7 @@ class MediaInfo:
     has_cover: bool = False    # attached picture (cover art) stream present
     video_duration: float = 0.0   # per-stream lengths (0 = unknown); screen recordings
     audio_duration: float = 0.0   # often have audio running past the video or vice versa
+    tags: dict = field(default_factory=dict)   # the file's own tags (title, ComfyUI's job…)
 
     def length_of(self, video: bool, audio: bool) -> float:
         """Duration of an output that keeps only these streams."""
@@ -272,6 +273,7 @@ def probe(path: str, timeout: float = 30) -> MediaInfo:
         size=int(_num(fmt.get("size"), os.path.getsize(path))),
         bitrate=int(_num(fmt.get("bit_rate"))),
     )
+    info.tags = {str(k): str(v) for k, v in (fmt.get("tags") or {}).items()}
     for s in streams:
         kind = s.get("codec_type")
         disp = s.get("disposition") or {}
