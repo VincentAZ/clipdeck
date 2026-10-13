@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from typing import Callable
 from fractions import Fraction
 
 from .media import MediaInfo, normalize_rotation
@@ -175,6 +176,7 @@ class Expect:
     audio_md5_from: str = ""
     max_bytes: int = 0                # size target: re-encoded at a lower bitrate if over
     tags: dict = field(default_factory=dict)   # the output's file tags must be exactly these
+    png_from: str = ""                # a PNG whose picture chunks must be byte-identical
 
 
 @dataclass
@@ -183,6 +185,7 @@ class Step:
     label: str
     duration: float                   # media seconds this step will process, for progress
     weight: float = 1.0
+    call: Callable[[], None] | None = None   # a step done in Python instead of ffmpeg
 
 
 @dataclass
@@ -1330,14 +1333,28 @@ def build_contact_sheet(info: MediaInfo, cols: int = 4, rows: int = 4, thumb_w: 
 # from two tags ComfyUI writes: "workflow" with only extra.airs (Civitai's id of the model, an
 # AIR) and "prompt" with only the node that loads the model. These are the tags of an upload
 # Civitai accepted; AIRs from https://civitai.com/api/v1/model-versions/<id> ("air").
-CIVITAI_MODELS = [
+CIVITAI_MODELS = [  # key, label, AIR, loader node as ComfyUI saves it, what it makes
     ("minimax-h3", "MiniMax H3", "urn:air:minimaxh3:checkpoint:civitai:2821932@3216500",
      ("UNETLoader", "Load Diffusion Model",
       {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-       "weight_dtype": "default"})),
+       "weight_dtype": "default"}), "video"),
     ("ltx-2-3", "LTX 2.3", "urn:air:ltxv23:checkpoint:civitai:2448150@2752717",
      ("CheckpointLoaderSimple", "Load Checkpoint",
-      {"ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"})),
+      {"ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"}), "video"),
+    ("krea-2-raw", "Krea 2 RAW", "urn:air:krea2:checkpoint:civitai:2726029@3147780",
+     ("UNETLoader", "Load Diffusion Model",
+      {"unet_name": "krea2_raw_fp8_scaled.safetensors", "weight_dtype": "default"}), "image"),
+    ("krea-2-turbo", "Krea 2 Turbo", "urn:air:krea2:checkpoint:civitai:2726029@3091481",
+     ("UNETLoader", "Load Diffusion Model",
+      {"unet_name": "krea2_turbo_int8_convrot.safetensors", "weight_dtype": "default"}), "image"),
+    ("z-image-turbo", "Z-Image Turbo",
+     "urn:air:zimageturbo:diffusionmodel:civitai:2168935@2442439",
+     ("UNETLoader", "Load Diffusion Model",
+      {"unet_name": "z_image_turbo_bf16.safetensors", "weight_dtype": "default"}), "image"),
+    ("qwen-image-edit", "Qwen Image Edit", "urn:air:qwen:checkpoint:civitai:1884704@2133258",
+     ("UNETLoader", "Load Diffusion Model",
+      {"unet_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors", "weight_dtype": "default"}),
+     "image"),
 ]
 # MKV and WebM write tag names in capitals (WORKFLOW), which Civitai is not known to read
 CIVITAI_TAG_CONTAINERS = ("mp4", "mov", "m4v")
@@ -1347,7 +1364,7 @@ AIR_RE = re.compile(r"^urn:air:[a-z0-9_.-]+:[a-z0-9_.-]+:civitai:\d+(@\d+)?$")
 def civitai_tags(model: str, air: str = "") -> dict[str, str]:
     """The tags for one of CIVITAI_MODELS (by key), or for any model by its AIR (then only
     "workflow": the loader node of an unknown model is not known)."""
-    for key, _label, known_air, (cls, title, inputs) in CIVITAI_MODELS:
+    for key, _label, known_air, (cls, title, inputs), _kind in CIVITAI_MODELS:
         if key == model:
             node = {"1": {"inputs": inputs, "class_type": cls, "_meta": {"title": title}}}
             return {"workflow": json.dumps({"extra": {"airs": [known_air]}},
@@ -1360,16 +1377,27 @@ def civitai_tags(model: str, air: str = "") -> dict[str, str]:
     return {"workflow": json.dumps({"extra": {"airs": [air]}}, separators=(",", ":"))}
 
 
+def civitai_model_kind(model: str) -> str:
+    """What a listed model makes ("video" or "image"); "" for one given by its AIR."""
+    return next((m[4] for m in CIVITAI_MODELS if m[0] == model), "")
+
+
+def is_civitai_image(path: str) -> bool:
+    return path.lower().endswith(".png")
+
+
 def build_civitai_tag(info: MediaInfo, tags: dict[str, str], out_dir: str | None = None,
                       taken: set[str] | None = None, replace_original: bool = False) -> Plan:
     """A copy of the clip whose only tags are `tags` (see civitai_tags): every other tag,
     a ComfyUI prompt included, goes. Video and sound are copied bit for bit."""
+    if info.container == "png":
+        return _build_civitai_png(info, tags, out_dir, taken, replace_original)
     if not info.has_video:
         raise PlanError(f"{info.name} has no video")
     if info.container not in CIVITAI_TAG_CONTAINERS:
         raise PlanError(f"{info.name}: Civitai tags go in MP4 or MOV. Convert it to MP4 first "
                         "(Edit & Convert).")
-    out = output_path(info, info.container, "" if replace_original else "_civitai",
+    out = output_path(info, info.container, "_civitai",
                       out_dir, taken)
     tmp = temp_for(out)
     argv = list(COMMON) + ["-i", info.path, "-map", "0:V", "-map", "0:a?", "-c", "copy",
@@ -1388,17 +1416,37 @@ def build_civitai_tag(info: MediaInfo, tags: dict[str, str], out_dir: str | None
         expect.audio_tracks = [(t.codec, t.sample_rate, t.channels) for t in info.audio]
         expect.audio_count = len(info.audio)
         expect.audio_md5_from = info.path
-    label = next((lab for _k, lab, air, _n in CIVITAI_MODELS
-                  if air in tags.get("workflow", "")), "")
-    air = json.loads(tags["workflow"])["extra"]["airs"][0]
     gone = [k for k in info.tags if k not in ("major_brand", "minor_version",
                                               "compatible_brands", "encoder")]
-    summary = [f"Civitai model: {label or air}",
-               "Removed tags: " + (", ".join(sorted(gone)) if gone else "none"),
-               "Video and audio copied bit for bit"]
+    summary = _civitai_summary(tags, gone) + ["Video and audio copied bit for bit"]
     return Plan(title=os.path.basename(out), inputs=[info], output=out, temp=tmp,
                 steps=[Step(argv, "Writing Civitai tags", info.duration)], expect=expect,
                 summary=summary, replace_original=replace_original)
+
+
+def _civitai_summary(tags: dict[str, str], gone) -> list[str]:
+    air = json.loads(tags["workflow"])["extra"]["airs"][0]
+    label = next((m[1] for m in CIVITAI_MODELS if m[2] == air), "")
+    return [f"Civitai model: {label or air}",
+            "Removed tags: " + (", ".join(sorted(gone)) if gone else "none")]
+
+
+def _build_civitai_png(info: MediaInfo, tags: dict[str, str], out_dir, taken,
+                       replace_original: bool) -> Plan:
+    from . import pngtags
+    try:
+        gone = list(pngtags.read_text(info.path))
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        raise PlanError(f"{info.name}: can't read this PNG ({e})") from e
+    out = output_path(info, "png", "_civitai", out_dir, taken)
+    tmp = temp_for(out)
+    step = Step([], "Writing Civitai tags", 0.0,
+                call=lambda: pngtags.write_tagged(info.path, tmp, tags))
+    expect = Expect(kind="image", vcodec="png", width=info.width, height=info.height,
+                    rotation=None, tags=dict(tags), png_from=info.path)
+    return Plan(title=os.path.basename(out), inputs=[info], output=out, temp=tmp,
+                steps=[step], expect=expect, replace_original=replace_original,
+                summary=_civitai_summary(tags, gone) + ["Picture copied byte for byte"])
 
 
 def detect_crop(info: MediaInfo, timeout: float = 60) -> tuple[int, int, int, int] | None:

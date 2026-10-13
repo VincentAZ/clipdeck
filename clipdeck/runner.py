@@ -14,6 +14,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import pngtags
 from .media import ProbeError, probe
 from .ops import Plan, unique_path
 from .settings import config_dir
@@ -343,14 +344,28 @@ def verify(plan: Plan, path: str, thorough: bool, cancel: threading.Event, log: 
             fails.append(f"duration {d:.3f}s ≠ {ex.duration:.3f}s (±{ex.dur_tol:.2f})")
 
     if ex.tags:
-        mine = {k: v for k, v in info.tags.items()
-                if k not in ("major_brand", "minor_version", "compatible_brands", "encoder")}
+        if ex.png_from:
+            try:
+                mine = pngtags.read_text(path)
+            except (OSError, ValueError, UnicodeDecodeError) as e:
+                mine = {}
+                fails.append(f"could not read the PNG's tags ({e})")
+        else:
+            mine = {k: v for k, v in info.tags.items()
+                    if k not in ("major_brand", "minor_version", "compatible_brands", "encoder")}
         if mine != ex.tags:
             extra = sorted(set(mine) - set(ex.tags))
             wrong = sorted(k for k in ex.tags if mine.get(k) != ex.tags[k])
             fails.append("file tags are not as written" +
                          (f": missing or different {', '.join(wrong)}" if wrong else "") +
                          (f"; left over {', '.join(extra)}" if extra else ""))
+
+    if ex.png_from:
+        try:
+            if pngtags.picture(ex.png_from) != pngtags.picture(path):
+                fails.append("the picture is not byte-identical to the original")
+        except (OSError, ValueError) as e:
+            fails.append(f"could not compare the picture with the original ({e})")
 
     if ex.max_bytes and info.size > ex.max_bytes:
         warns.append(f"file is {info.size / 1048576:.2f} MB, above the "
@@ -506,6 +521,14 @@ def execute(plan: Plan, cancel: threading.Event, on_progress: ProgressFn,
             span = step.weight / total_w * (1 - verify_share)
             label = step.label + note
             on_progress(base, label)
+            if step.call is not None:
+                try:
+                    step.call()
+                except (OSError, ValueError) as e:
+                    res.failures = [f"{label} failed: {e}"]
+                    return False
+                done_w += step.weight
+                continue
             rc = run_ffmpeg(step.argv, step.duration,
                             lambda f, b=base, s=span, l=label: on_progress(b + f * s, l),
                             cancel, log)

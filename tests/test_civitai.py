@@ -52,21 +52,41 @@ def scenario(app, win):
     t.t_air.set_text("not an air")
     win.add_paths([clips[0]], select=True)
     yield 0.3
-    t._tag(t._tag_clips())
+    t._tag([i.info for i in t._tag_clips()])
     assert "error" in t.t_air.get_css_classes() and len(win.queue.jobs) == 2, "a bad AIR queues nothing"
     t.t_air.set_text("urn:air:ltxv23:checkpoint:civitai:2448150@2752717")
-    t._tag(t._tag_clips())
+    t._tag([i.info for i in t._tag_clips()])
     yield Wait(lambda: len(win.queue.jobs) == 3 and win.queue.active_count() == 0, "copy", 60)
     job = win.queue.jobs[2]
     assert job.state == DONE, job.result.failures
     assert job.result.output.endswith("a_civitai.mp4"), job.result.output
     tags = probe(job.result.output).tags
     assert set(tags) - {"major_brand", "minor_version", "compatible_brands", "encoder"} == {"workflow"}, tags
+    # pictures: a video model is refused, a picture model tags them (not via the library)
+    from clipdeck import pngtags
+    t.t_model.set_key("minimax-h3")
+    t.t_replace.set_active(True)
+    files = Gdk.FileList.new_from_list([Gio.File.new_for_path(picture)])
+    assert t._on_tag_drop(None, files, 0, 0)
+    yield 1.0
+    assert len(win.queue.jobs) == 3, "MiniMax H3 doesn't tag a picture"
+    t.t_model.set_key("krea-2-raw")
+    before = pngtags.picture(picture)
+    assert t._on_tag_drop(None, files, 0, 0)
+    yield Wait(lambda: len(win.queue.jobs) == 4 and win.queue.active_count() == 0, "picture", 30)
+    job = win.queue.jobs[3]
+    assert job.state == DONE, job.result.failures
+    assert job.result.output == picture, job.result.output
+    assert pngtags.picture(picture) == before, "the picture is byte-identical"
+    tags = pngtags.read_text(picture)
+    assert set(tags) == {"workflow", "prompt"}, tags
+    assert "urn:air:krea2:checkpoint:civitai:2726029@3147780" in tags["workflow"], tags
+    assert win.library.find(picture) is None, "pictures don't go in the video library"
     yield 0.3
     screenshot(win, "screenshots/civitai-queue.png")
     # remembered for next time
     s = win.settings
-    assert (s.civitai_model, s.civitai_replace) == ("other", False), (s.civitai_model, s.civitai_replace)
+    assert (s.civitai_model, s.civitai_replace) == ("krea-2-raw", True), (s.civitai_model, s.civitai_replace)
 
 
 if __name__ == "__main__":
@@ -81,4 +101,11 @@ if __name__ == "__main__":
                          "aac", "-shortest", "-metadata", 'prompt={"6":{"inputs":{"text":"MOCK PROMPT"}}}',
                          "-metadata", "comment=made in ComfyUI",
                          "-movflags", "+use_metadata_tags", c)
+        picture = os.path.join(directory, "still.png")
+        raw = os.path.join(directory, "raw.png")
+        fixtures.run("-f", "lavfi", "-i", "testsrc2=s=64x48", "-frames:v", "1", raw)
+        sys.path.insert(0, os.getcwd())
+        from clipdeck import pngtags
+        pngtags.write_tagged(raw, picture, {"prompt": '{"6":{"inputs":{"text":"MOCK PROMPT"}}}'})
+        os.unlink(raw)
         sys.exit(run(scenario))

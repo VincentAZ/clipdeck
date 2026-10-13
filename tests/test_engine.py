@@ -1277,6 +1277,22 @@ class CivitaiTagTests(Base):
         self.assertFalse(res.ok)
         self.assertTrue(any("left over" in f for f in res.failures), res.failures)
 
+    def test_png_picture(self):
+        from clipdeck import pngtags
+        raw = os.path.join(self.out, "raw.png")
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48",
+                        "-frames:v", "1", raw], check=True)
+        path = os.path.join(self.out, "comfy.png")
+        pngtags.write_tagged(raw, path, {"prompt": "SECRET WORDS", "workflow": "{}"})
+        res = self.run_plan(ops.build_civitai_tag(probe(path), ops.civitai_tags("z-image-turbo"),
+                                                  self.out))
+        tags = pngtags.read_text(res.output)
+        self.assertIn("zimageturbo", tags["workflow"])
+        self.assertIn("z_image_turbo_bf16.safetensors", tags["prompt"])
+        self.assertNotIn(b"SECRET WORDS", read(res.output, "rb"))
+        self.assertEqual(pngtags.picture(res.output), pngtags.picture(path))
+        self.assertEqual(ops.civitai_model_kind("z-image-turbo"), "image")
+
     def test_not_a_tag_container(self):
         self.assertTrue(ops.build_civitai_tag(probe(src("stored_pcm.mov")),
                                               ops.civitai_tags("minimax-h3"), self.out))
