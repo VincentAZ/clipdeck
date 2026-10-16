@@ -143,8 +143,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.side_stack = Gtk.Stack()
         empty = Adw.StatusPage(icon_name="folder-videos-symbolic", title="Drop videos here",
-                               description="Or add files to fix, rotate and convert them.\n"
-                               "Tagging pictures for Civitai? Use Tools → Tag for Civitai.")
+                               description="Or add files to fix, rotate and convert them.")
         b = Gtk.Button(label="Add Videos…", halign=Gtk.Align.CENTER)
         b.add_css_class("pill")
         b.add_css_class("suggested-action")
@@ -252,8 +251,7 @@ class MainWindow(Adw.ApplicationWindow):
             if select and existing:
                 self._select_items(existing)
             elif not existing:
-                self.toast("No video or audio files found. To tag pictures for Civitai, "
-                           "use Tools → Tag for Civitai")
+                self.toast("No video or audio files found")
             return []
         if select or self.selection.get_selection().get_size() == 0:
             self._select_items(added)
@@ -356,8 +354,7 @@ class MainWindow(Adw.ApplicationWindow):
             return False
         files = [p for p in paths if os.path.isdir(p) or is_media_path(p)]
         if not files:
-            self.toast("No video or audio files in what was dropped. To tag pictures for "
-                       "Civitai, drop them on Tools → Tag for Civitai")
+            self.toast("No video or audio files in what was dropped")
             return False
         self.add_paths(files)
         return True

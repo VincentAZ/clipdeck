@@ -1,82 +1,212 @@
-# Clipdeck
+<p align="center">
+  <img src="data/local.clipdeck.Clipdeck.svg" width="96" alt="Clipdeck icon">
+</p>
 
-A GNOME desktop command center for video files: fix sideways phone clips, convert
-containers and codecs, trim, rotate, crop, resize, change speed or frame rate, fix
-audio, strip GPS metadata, make GIFs, join clips, grab frames and build contact sheets.
+<h1 align="center">Clipdeck</h1>
 
-It grew out of `~/scripts/fixrot` and keeps its two rules:
+<p align="center"><strong>Fix your footage. Make the cut. Check the result.</strong></p>
 
-- **Every output is verified before it is saved.** Codec, size, rotation flag,
-  duration, audio tracks (codec, sample rate, channels per track), bit-identical
-  copies where streams are copied, and with *thorough verification* (default) a full
-  decode of every frame plus a frame-count comparison with the source. An output that
-  fails is kept as `name.BAD.ext` for inspection and is never presented as done.
-- **Nothing is ever overwritten.** Outputs get a free name (`clip (2).mp4`), are
-  published atomically, and partial files are removed on failure, cancel, quit, logout
-  or `kill` (and, after a crash or power cut, on the next start).
-  “Replace originals” moves originals to the Trash (recoverable), only after the new
-  file has verified; no other job reads a file while it is being replaced.
+<p align="center">
+  A local video toolkit for the GNOME desktop.<br>
+  Trim, crop, rotate, convert, and batch-fix clips—with verification before saving.
+</p>
 
-## Install
+<p align="center">
+  <a href="#get-started">Get started</a> ·
+  <a href="#what-you-can-do">Features</a> ·
+  <a href="#how-clipdeck-protects-your-work">Verification</a> ·
+  <a href="https://github.com/VincentAZ/clipdeck/issues">Report a bug</a>
+</p>
 
-```sh
-sudo apt install ffmpeg python3-gi gir1.2-adw-1 gstreamer1.0-libav   # usually present
-./install.sh          # adds Clipdeck to the app grid and `clipdeck` to ~/.local/bin
+![Clipdeck’s Edit & Convert page showing a video preview, trim controls, export settings, and a plan for the output](docs/images/edit-and-convert.png)
+
+<p align="center"><sub>The real app, using generated demo footage. Your files stay on your machine.</sub></p>
+
+## From awkward clip to usable video
+
+A phone video plays sideways. A recording arrives in the wrong container. An audio
+codec refuses to cooperate with your editor. You need a shorter clip, a smaller
+file, or one clean frame.
+
+Clipdeck puts those everyday jobs in one GTK4/libadwaita interface, backed by
+FFmpeg. Add your files, see what needs attention, choose an operation, and inspect
+the plan before adding it to the queue. Work on one clip or a batch.
+
+**No account, uploads, or cloud processing.** Clipdeck runs locally with your
+installed media tools.
+
+## What you can do
+
+| Your task | In Clipdeck |
+| --- | --- |
+| **Fix a folder of problem clips** | Quick Fix diagnoses rotation, container, video codec, audio codec, and frame-rate issues, then shows the proposed changes. |
+| **Make a clean cut** | Scrub the preview, drag trim handles, enter precise times, and choose frame-accurate or lossless keyframe cuts. |
+| **Reframe the shot** | Draw and adjust a crop, use aspect-ratio shortcuts, detect black bars, rotate, flip, and resize. |
+| **Prepare a file for sharing** | Choose H.264, HEVC, or WebM presets, adjust quality, or target a file size. |
+| **Prepare footage for editing** | Export MOV with PCM audio, DNxHR HQ, or ProRes 422 HQ. |
+| **Adjust timing and sound** | Change frame rate or speed; mute, normalize, boost, or extract audio. |
+| **Finish small media jobs** | Join compatible clips losslessly, re-encode mixed clips, save full-resolution frames, build contact sheets, or make GIFs. |
+| **Control the export** | Strip metadata, choose an output folder, use available NVIDIA NVENC encoders, and run jobs in parallel. |
+
+<details>
+<summary><strong>See Quick Fix and Tools</strong></summary>
+
+### Diagnose first. Fix in a batch.
+
+![Quick Fix showing detected issues and the proposed changes for three demo clips](docs/images/quick-fix.png)
+
+### The useful extras, in one place
+
+![Tools showing clip ordering, join settings, and frame-export controls](docs/images/tools.png)
+
+</details>
+
+## How Clipdeck protects your work
+
+An FFmpeg process exiting successfully is only the beginning of a successful job.
+
+- **Check the output against the plan.** Depending on the operation, verification
+  checks codecs, dimensions, rotation, duration, audio tracks, frame counts, and
+  stream hashes when streams are copied.
+- **Decode it, too.** Thorough verification is on by default and adds a full decode
+  and source frame-count comparisons where applicable. It takes extra time; you
+  can turn it off in Preferences.
+- **Keep existing files.** New outputs get an available name, such as
+  `clip (2).mp4`. A file that fails verification is kept with a `.BAD` marker for
+  inspection and the job is reported as failed.
+- **Replace deliberately.** When you enable *Replace originals*, the original
+  moves to the desktop Trash only after the new file passes verification.
+- **Clean up interrupted work.** Cancellation and normal shutdown remove partial
+  files. A journal lets the next launch clean up work left by a crash.
+
+The Queue page shows progress, cancellation controls, results, warnings, and the
+FFmpeg log for each job.
+
+## Get started
+
+Clipdeck currently runs from a source checkout on Linux. It uses **Python 3.10+**,
+**GTK4**, **libadwaita 1.7+**, **PyGObject**, **FFmpeg**, and **ffprobe**.
+Video previews also need the relevant GStreamer decoders.
+
+On Debian/Ubuntu systems whose repositories provide those versions:
+
+```bash
+sudo apt install git ffmpeg python3-gi gir1.2-adw-1 gstreamer1.0-libav
+
+git clone https://github.com/VincentAZ/clipdeck.git
+cd clipdeck
+./install.sh
+```
+
+Launch **Clipdeck** from your application menu, or open files from a terminal:
+
+```bash
+clipdeck
+clipdeck /path/to/video.mp4 /path/to/another.mov
+```
+
+You can also drag files or folders onto the window, use **Add Videos**, or choose
+Clipdeck from your file manager’s **Open With** menu.
+
+> The installer checks for libadwaita 1.7 or newer. An older distribution may need
+> newer system packages. Available codecs and GPU acceleration depend on your
+> FFmpeg build and hardware; development checks currently use FFmpeg 8.0.1.
+
+### Your first export
+
+1. **Add a clip.** Inspect shows its media details and any detected problems.
+2. **Choose your job.** Use Quick Fix for compatibility issues, Edit & Convert for
+   individual adjustments or presets, and Tools for joins, frames, and contact sheets.
+3. **Read the plan and queue it.** Clipdeck processes and verifies the result.
+   Open the output or reveal it in your file manager from Queue.
+
+By default, outputs go beside their originals. Preferences lets you choose a
+single output folder, verification depth, and the number of parallel jobs.
+
+### Update or uninstall
+
+The launcher uses this checkout directly. Keep the folder in place and update it
+with:
+
+```bash
+git pull --ff-only
+```
+
+To remove the launcher, application-menu entry, and icon:
+
+```bash
 ./install.sh --uninstall
 ```
 
-The launcher runs from this checkout, so `git pull` updates the installed app.
-`clipdeck file.mp4 …` opens files directly; files and folders can also be dropped on
-the window, and Clipdeck appears in *Open With* for video files.
+Uninstalling leaves preferences in `~/.config/clipdeck` and thumbnails in
+`~/.cache/clipdeck`.
 
-## Pages
+## A few useful details
 
-| Page | What it does |
-|---|---|
-| **Inspect** | Player plus everything ffprobe knows; problems found are explained. |
-| **Quick Fix** | fixrot in a window: bakes rotation, MKV/WebM/AVI → MP4, odd codecs → H.264, FLAC/Opus/MP2 audio → AAC, optional constant frame rate, optional Resolve MOV next to each clip, optional replace-originals. Shows exactly what will happen per file. |
-| **Edit & Convert** | Presets (share, smaller HEVC, fit in 10 MB, Resolve MOV, DNxHR, ProRes, WebM, MKV remux, GIF, MP3, WAV) and every knob: format/codec/quality/speed, NVENC GPU encoding (remembered; frames too small for NVENC fall back to the CPU), target file size (two-pass; re-encoded at a lower bitrate if the result lands over), trim (draggable range handles, click-to-seek timeline, precise start/end fields, selection preview and reset; frame-accurate or lossless keyframe cut), rotate/flip (re-encoded or lossless flag-only), crop (draw, move and resize a box on the preview, precise pixel fields, reset, black-bar detection and aspect shortcuts), resize, frame rate, speed, deinterlace, stabilize, denoise, remove/normalize/boost audio, strip metadata. A live summary shows the result before anything is queued. |
-| **Tools** | **Tag for Civitai** first: pick the model (videos: MiniMax H3, LTX 2.3; pictures: Krea 2 RAW, Krea 2 Turbo, Z-Image Turbo, Qwen Image Edit; or any other by the AIR on its Civitai page) and drop videos and PNG pictures (or folders of them) on the box, or click **Choose videos or pictures…** in it, or tag the clips selected in the library (the library's *Add Videos* takes videos only). Each MP4/MOV/PNG then carries only what Civitai reads to know the model (`workflow` with its AIR, `prompt` with the loader node; competitions require it): every other tag goes, a ComfyUI prompt included, and the video, sound or picture is copied bit for bit and verified. A video model won't tag pictures, nor a picture model videos; JPEG and WebP pictures are skipped (the tags go in PNG). *Replace originals* (on by default) gives the tagged file the original's name and moves the original to the Trash. Then join clips (lossless when formats match, otherwise normalized re-encode), save a full-resolution frame, contact sheets (seeks to each frame, so an hour of 4K takes seconds). |
-| **Queue** | Live progress, cancel, open, show in folder, add result to library, full ffmpeg log per job. |
+- **Lossless trimming follows keyframes.** Choose frame-accurate trimming when
+  exact cut boundaries matter; that requires re-encoding.
+- **Lossless frame-rate changes alter playback speed.** Keeping every compressed
+  frame while changing 60 fps to 30 fps doubles the duration. Audio is re-encoded
+  to stay in sync. This mode requires a constant-rate source, MP4/MOV output, and
+  no conflicting video edits.
+- **File-size targets are checked.** Clipdeck can retry an oversized encode at a
+  lower bitrate. Very small targets still depend on the source and encoder; check
+  the job’s warnings.
+- **Metadata stripping is optional.** It removes mapped metadata and chapters;
+  it does not remove identifying content visible or audible in the media itself.
+- **Frame exports respect the crop.** Save a PNG from Inspect or Edit & Convert
+  at the current preview position. Edit exports include the enabled crop.
 
-Preferences: output next to originals or in one folder, thorough verification, jobs
-in parallel.
+## Keyboard shortcuts
 
-**Save frame (PNG)** below the Inspect and Edit & Convert previews saves an image
-at the current scrub position, using the configured output folder. Pixel dimensions
-and aspect ratio appear beside the control. In Edit & Convert, the image includes
-the enabled crop, and its displayed dimensions and ratio update as you adjust it.
+| Shortcut | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd> + <kbd>O</kbd> | Add videos |
+| <kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>5</kbd> | Switch pages |
+| <kbd>Delete</kbd> | Remove selected clips from the focused library list; keep the files |
+| <kbd>Ctrl</kbd> + <kbd>,</kbd> | Preferences |
+| <kbd>Ctrl</kbd> + <kbd>Q</kbd> | Quit |
 
-**Lossless frame-rate changes:** in Edit & Convert → Size and timing, choose a
-specific frame rate and enable **Change frame rate: lossless video**. This keeps
-every compressed video frame and changes playback speed and duration (for example,
-60 → 30 fps takes twice as long). Audio is re-encoded to stay in sync. Use Automatic
-or Copy video with MP4/MOV output and a constant-rate source; turn off other video
-edits and trimming. The original frame-rate mode keeps the duration and re-encodes.
+## Development
 
-Keyboard: <kbd>Ctrl</kbd>+<kbd>O</kbd> add videos, <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>5</kbd>
-switch pages, <kbd>Delete</kbd> (in the library list) removes clips from the library
-(files are not touched), <kbd>Ctrl</kbd>+<kbd>,</kbd> preferences, <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit.
+Run directly from the repository:
 
-## Tests
-
-```sh
-./run-tests.sh        # engine (real ffmpeg, ~140 tests) + headless UI scenario (Xvfb)
+```bash
+python3 -m clipdeck
 ```
 
-The engine tests generate synthetic media (phone-style rotated clips, MKV/AVI/WebM,
-VFR, HDR, anamorphic, multi-track, subtitles, long-GOP, mismatched stream lengths,
-3/4-channel audio, odd sample rates…) and check results
-independently, including decoded pixel orientation. The UI test drives the real app
-under Xvfb through every page, at several window sizes, and fails on any exception or
-GTK warning.
+The engine tests create synthetic media and exercise real FFmpeg operations.
+The UI tests drive the actual GTK app under Xvfb, including crop, trim, frame
+saving, queue operations, and window layouts.
 
-## Layout
+```bash
+# Xvfb is needed for the headless UI checks.
+sudo apt install xvfb xauth
 
+./run-tests.sh
+
+# Or run just the engine checks:
+python3 -m unittest tests.test_engine
 ```
-clipdeck/media.py    probe + diagnosis
-clipdeck/ops.py      Recipe -> Plan (ffmpeg commands + what the output must look like)
-clipdeck/runner.py   run with progress/cancel, verify, publish without clobbering
-clipdeck/jobs.py     job queue (workers, dependencies, replace-original ordering)
-clipdeck/ui/         GTK4 / libadwaita interface
-```
+
+Current validation: the engine suite runs 150 tests, with two NVENC-dependent
+skips on the development machine. The crop, trim, and frame-export UI tests pass.
+The full UI scenario completes its interaction checks, but its strict warning check
+still reports GStreamer stream-start/segment warnings in the development environment.
+
+| Code | Responsibility |
+| --- | --- |
+| `clipdeck/media.py` | Probe files and diagnose issues |
+| `clipdeck/ops.py` | Turn an operation into an FFmpeg plan and verification expectations |
+| `clipdeck/runner.py` | Execute, verify, and save results |
+| `clipdeck/jobs.py` | Schedule work, cancellation, and dependencies |
+| `clipdeck/ui/` | GTK4/libadwaita interface |
+
+Found a problem? [Open an issue](https://github.com/VincentAZ/clipdeck/issues) with
+reproduction steps, your distribution, FFmpeg version, and the relevant job log.
+Remove private paths and metadata from logs before posting them. Small synthetic
+or non-sensitive sample files are especially helpful.
+
+---
+
+Built by [VincentAZ](https://github.com/VincentAZ).

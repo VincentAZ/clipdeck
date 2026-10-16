@@ -123,7 +123,7 @@ class MediaInfo:
     has_cover: bool = False    # attached picture (cover art) stream present
     video_duration: float = 0.0   # per-stream lengths (0 = unknown); screen recordings
     audio_duration: float = 0.0   # often have audio running past the video or vice versa
-    tags: dict = field(default_factory=dict)   # the file's own tags (title, ComfyUI's job…)
+    tags: dict = field(default_factory=dict)   # the file's own metadata tags
 
     def length_of(self, video: bool, audio: bool) -> float:
         """Duration of an output that keeps only these streams."""

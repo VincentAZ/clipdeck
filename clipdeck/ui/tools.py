@@ -1,16 +1,15 @@
-"""Tools: join clips, grab a frame, build a contact sheet, tag videos for Civitai."""
+"""Tools: join clips, grab a frame, build a contact sheet."""
 
 from __future__ import annotations
 
 import os
-import threading
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+from gi.repository import Adw, Gtk
 
 from .. import ops
 from ..media import fmt_duration, parse_time
 from ..ops import PlanError, Recipe
-from .library import PROBING, MediaItem, is_media_path
+from .library import MediaItem
 from .widgets import KeyCombo, clear_group, plain_row
 
 
@@ -27,7 +26,6 @@ class ToolsPage(Gtk.Box):
 
         page = Adw.PreferencesPage(vexpand=True)
         self.append(page)
-        self._build_civitai(page)
 
         # ---------------- merge
         self.merge = Adw.PreferencesGroup(
@@ -88,212 +86,6 @@ class ToolsPage(Gtk.Box):
             g.add(w)
         self.set_items([])
 
-    # ---------------- civitai
-    def _build_civitai(self, page):
-        st = self.ctx.settings
-        self._tag_waiting: list[MediaItem] = []   # dropped, queued once read
-        g = Adw.PreferencesGroup(
-            title="Tag for Civitai",
-            description="Writes which model made a video (MP4) or picture (PNG), the way "
-                        "Civitai reads it (some uploads and competitions require it). Every "
-                        "other tag goes, a ComfyUI prompt included. The video, sound or "
-                        "picture is copied, not re-encoded.")
-        page.add(g)
-        drop = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
-                       height_request=110, valign=Gtk.Align.CENTER, margin_top=12)
-        drop.add_css_class("card")
-        drop.append(Gtk.Image(icon_name="folder-videos-symbolic", pixel_size=32,
-                              margin_top=18, css_classes=["dim-label"]))
-        self.t_drop_label = Gtk.Label(label="Drop videos or PNG pictures here to tag them",
-                                      wrap=True, justify=Gtk.Justification.CENTER)
-        drop.append(self.t_drop_label)
-        # the library's Add Videos takes videos only: pictures come in here
-        self.t_choose = Gtk.Button(label="Choose videos or pictures…",
-                                   halign=Gtk.Align.CENTER, margin_bottom=18)
-        self.t_choose.add_css_class("pill")
-        self.t_choose.connect("clicked", lambda *_: self._choose_to_tag())
-        drop.append(self.t_choose)
-        target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
-        target.connect("drop", self._on_tag_drop)
-        target.connect("enter", lambda *_: (drop.add_css_class("accent"), Gdk.DragAction.COPY)[1])
-        target.connect("leave", lambda *_: drop.remove_css_class("accent"))
-        drop.add_controller(target)
-        self.t_drop = drop
-        self.t_model = KeyCombo("Model", [(m[0], f"{m[1]} ({'video' if m[4] == 'video' else 'picture'})")
-                                          for m in ops.CIVITAI_MODELS] +
-                                [("other", "Another model…")])
-        self.t_model.set_key(st.civitai_model)
-        self.t_air = Adw.EntryRow(title="Its AIR, from the model's Civitai page (urn:air:…)")
-        self.t_air.set_text(st.civitai_air)
-        self.t_replace = Adw.SwitchRow(
-            title="Replace originals",
-            subtitle="The tagged copy takes the original's name; the original goes to the Trash")
-        self.t_replace.set_active(st.civitai_replace)
-        self.t_go = Adw.ButtonRow(title="Tag selected clips")
-        self.t_go.add_css_class("suggested-action")
-        self.t_go.connect("activated", lambda *_: self._tag([i.info for i in self._tag_clips()]))
-        # a group shows its rows first, then other widgets: model, then the drop box
-        g.add(self.t_model)
-        g.add(self.t_air)
-        g.add(drop)
-        opts = Adw.PreferencesGroup()
-        page.add(opts)
-        opts.add(self.t_replace)
-        opts.add(self.t_go)
-        self.t_model.connect("notify::selected", lambda *_: self._sync_tag(save=True))
-        self.t_air.connect("changed", lambda *_: self._sync_tag(save=True))
-        self.t_replace.connect("notify::active", lambda *_: self._sync_tag(save=True))
-        self._sync_tag()
-
-    def _tag_clips(self):
-        return [i for i in self.items if i.ready and i.info.has_video]
-
-    def _sync_tag(self, save=False):
-        other = self.t_model.get_key() == "other"
-        self.t_air.set_visible(other)
-        st = self.ctx.settings
-        if save:
-            st.civitai_model = self.t_model.get_key()
-            st.civitai_air = self.t_air.get_text().strip()
-            st.civitai_replace = self.t_replace.get_active()
-            st.save()
-        n = len(self._tag_clips())
-        self.t_go.set_sensitive(n > 0)
-        self.t_go.set_title(f"Tag {n} selected clip{'s' if n != 1 else ''}" if n
-                            else "Select clips in the library, or drop them above")
-
-    def _tag_tags(self):
-        try:
-            return ops.civitai_tags(self.t_model.get_key(), self.t_air.get_text())
-        except PlanError as e:
-            self.t_air.add_css_class("error")
-            self.ctx.toast(str(e))
-            return None
-
-    def _wrong_kind(self, pictures: bool) -> str:
-        """Why the picked model can't tag these (a video model on pictures, or the other way)."""
-        kind = ops.civitai_model_kind(self.t_model.get_key())
-        if kind and kind != ("image" if pictures else "video"):
-            label = next(m[1] for m in ops.CIVITAI_MODELS if m[0] == self.t_model.get_key())
-            return (f"{label} makes {'videos' if kind == 'video' else 'pictures'}: pick the "
-                    f"model that made these {'pictures' if pictures else 'videos'}")
-        return ""
-
-    def _tag(self, infos):
-        tags = self._tag_tags()
-        if tags is None or not infos:
-            return
-        self.t_air.remove_css_class("error")
-        for pictures in (False, True):
-            why = self._wrong_kind(pictures)
-            if why and any((i.container == "png") == pictures for i in infos):
-                self.ctx.toast(why)
-                infos = [i for i in infos if (i.container == "png") != pictures]
-        taken = self.ctx.taken()
-        n = 0
-        for info in infos:
-            try:
-                plan = ops.build_civitai_tag(info, tags, self.ctx.out_dir, taken,
-                                             replace_original=self.t_replace.get_active())
-            except PlanError as e:
-                self.ctx.toast(str(e))
-                continue
-            taken.add(plan.output)
-            self.ctx.submit(plan)
-            n += 1
-        if n:
-            self.ctx.toast(f"Tagging {n} file{'s' if n != 1 else ''} for Civitai")
-            self.ctx.show_queue()
-
-    def _choose_to_tag(self):
-        dlg = Gtk.FileDialog(title="Choose Videos or Pictures to Tag", modal=True)
-        filters = Gio.ListStore.new(Gtk.FileFilter)
-        f = Gtk.FileFilter(name="MP4/MOV videos and PNG pictures")
-        for pat in ("*.mp4", "*.MP4", "*.mov", "*.MOV", "*.m4v", "*.png", "*.PNG"):
-            f.add_pattern(pat)
-        filters.append(f)
-        dlg.set_filters(filters)
-        st = self.ctx.settings
-        if st.last_dir and os.path.isdir(st.last_dir):
-            dlg.set_initial_folder(Gio.File.new_for_path(st.last_dir))
-
-        def done(d, res):
-            try:
-                files = d.open_multiple_finish(res)
-            except GLib.Error:
-                return
-            paths = [files.get_item(i).get_path() for i in range(files.get_n_items())]
-            paths = [p for p in paths if p]
-            if paths:
-                st.last_dir = os.path.dirname(paths[0])
-                st.save()
-                self.tag_paths(paths)
-        dlg.open_multiple(self.get_root(), None, done)
-
-    def _on_tag_drop(self, _target, value, _x, _y):
-        self.t_drop.remove_css_class("accent")
-        return self.tag_paths([f.get_path() for f in value.get_files() if f.get_path()])
-
-    def tag_paths(self, paths):
-        """Tag these videos, PNG pictures and folders of them with the picked model."""
-        pictures, others = [], 0
-        for p in paths:
-            found = ([os.path.join(r, f) for r, _d, fs in os.walk(p) for f in sorted(fs)]
-                     if os.path.isdir(p) else [p])
-            pictures += [f for f in found if ops.is_civitai_image(f)]
-            others += sum(1 for f in found if f.lower().endswith((".jpg", ".jpeg", ".webp")))
-        files = [p for p in self.ctx.library.expand(
-            [p for p in paths if os.path.isdir(p) or is_media_path(p)])]
-        if others:
-            self.ctx.toast(f"{others} JPEG/WebP picture{'s' if others != 1 else ''} skipped: "
-                           "Civitai's tags go in PNG pictures")
-        if not files and not pictures:
-            if not others:
-                self.ctx.toast("No videos or PNG pictures in what was dropped")
-            return True        # handled here: the window must not add them as well
-        if self._tag_tags() is None:
-            return True
-        if pictures:
-            # pictures aren't library clips: read them in the background, then tag them
-            threading.Thread(target=self._read_pictures, args=(pictures,), daemon=True).start()
-        if not files:
-            return True
-        self.ctx.add_paths(files, select=True)
-        items = [self.ctx.library.find(p) for p in files]
-        self._tag_waiting += [i for i in items if i and i not in self._tag_waiting]
-        if self._tag_waiting:
-            GLib.timeout_add(200, self._drain_drops)
-        return True
-
-    def _read_pictures(self, paths):
-        from ..media import ProbeError, probe
-        infos, bad = [], []
-        for p in paths:
-            try:
-                infos.append(probe(p))
-            except (ProbeError, OSError) as e:
-                bad.append(f"{os.path.basename(p)}: {e}")
-
-        def done():
-            for b in bad[:3]:
-                self.ctx.toast(b)
-            self._tag(infos)
-            return False
-        GLib.idle_add(done)
-
-    def _drain_drops(self):
-        """Queue dropped clips as soon as they have been read (probing runs in the
-        background); the ones that can't be read or have no video are reported."""
-        ready = [i for i in self._tag_waiting if i.state != PROBING]
-        self._tag_waiting = [i for i in self._tag_waiting if i.state == PROBING]
-        good = [i for i in ready if i.ready and i.info.has_video]
-        bad = [i for i in ready if i not in good]
-        if good:
-            self._tag([i.info for i in good])
-        for i in bad:
-            self.ctx.toast(f"{i.name}: {i.error or 'no video'}")
-        return bool(self._tag_waiting)       # keep polling while some are being read
-
     # ------------------------------------------------------------------ selection
     def set_items(self, items: list[MediaItem]):
         self.items = items
@@ -306,8 +98,6 @@ class ToolsPage(Gtk.Box):
         self.c_go.set_sensitive(bool(videos))
         self.c_go.set_title(f"Build {len(videos)} contact sheets" if len(videos) > 1
                             else "Build contact sheet")
-        if hasattr(self, "t_go"):
-            self._sync_tag()
 
     def _ready_order(self):
         return [i for i in self.order if i.ready and i.info.has_video]

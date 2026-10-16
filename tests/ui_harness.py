@@ -11,7 +11,8 @@ import time
 import traceback
 
 os.environ.setdefault("GSK_RENDERER", "cairo")
-os.environ.setdefault("GDK_BACKEND", "x11")
+# These scenarios run under Xvfb, even when the developer's desktop uses Wayland.
+os.environ["GDK_BACKEND"] = "x11"
 os.environ["CLIPDECK_NON_UNIQUE"] = "1"
 _sandbox = tempfile.mkdtemp(prefix="clipdeck-ui-home-")
 os.environ["XDG_CONFIG_HOME"] = os.path.join(_sandbox, "config")

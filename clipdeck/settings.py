@@ -22,9 +22,6 @@ class Settings:
     autofix_cfr: bool = False
     autofix_mov: bool = False
     last_dir: str = ""
-    civitai_model: str = "minimax-h3"   # Tools → Tag for Civitai
-    civitai_air: str = ""
-    civitai_replace: bool = True
 
     @property
     def out_dir(self) -> str | None:

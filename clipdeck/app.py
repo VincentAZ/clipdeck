@@ -114,6 +114,7 @@ class ClipdeckApp(Adw.Application):
         about = Adw.AboutDialog(
             application_name="Clipdeck", application_icon=APP_ID, version=__version__,
             developer_name="Vincent",
+            website="https://github.com/VincentAZ/clipdeck",
             comments="A command center for fixing, rotating and converting video. Every output "
                      "is verified before it is saved, and nothing is ever overwritten.",
             license_type=Gtk.License.MIT_X11)
