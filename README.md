@@ -54,49 +54,36 @@ installed media tools.
 ## Screenshot tour
 
 The Edit & Convert screenshot above shows the preview, trim range, export settings,
-and output plan. Expand the tour below to see the other four pages. All screenshots
-come from the current application with generated, non-personal demo clips.
+and output plan. The other four main pages are shown below. All screenshots come
+from the current application with generated, non-personal demo clips.
 
-<details>
-<summary><strong>Inspect: understand the file before changing it</strong></summary>
+### Inspect: understand the file before changing it
 
 ![Inspect showing the video preview, dimensions, duration, and media details for a demo clip](docs/images/inspect.png)
 
 Inspect combines playback with file and stream details, detected issues, and a
 full-resolution PNG frame-export button.
 
-</details>
-
-<details>
-<summary><strong>Quick Fix: diagnose first, then fix in a batch</strong></summary>
-
+### Quick Fix: diagnose first, then fix in a batch
 
 ![Quick Fix showing detected issues and the proposed changes for three demo clips](docs/images/quick-fix.png)
 
 Quick Fix explains the proposed change for each selected clip. Enable constant
 frame rate or an additional Resolve MOV when needed; replacement is optional.
 
-</details>
-
-<details>
-<summary><strong>Tools: join clips, save frames, and build contact sheets</strong></summary>
+### Tools: join clips, save frames, and build contact sheets
 
 ![Tools showing clip ordering, join settings, and frame-export controls](docs/images/tools.png)
 
 Reorder clips before joining them, export a frame at a specified time, or scroll
 down to choose the rows, columns, and thumbnail size for a contact sheet.
 
-</details>
-
-<details>
-<summary><strong>Queue: follow each job through verification</strong></summary>
+### Queue: follow each job through verification
 
 ![Queue showing four completed and verified demo jobs: rotation repair, container conversion, a frame export, and a contact sheet](docs/images/queue.png)
 
 Completed jobs offer controls to open the output, show its folder, add it to the
 library, or inspect its log. Running jobs can be cancelled individually or together.
-
-</details>
 
 ## Presets and output formats
 
