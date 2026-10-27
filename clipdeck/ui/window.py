@@ -17,6 +17,7 @@ from .inspect import InspectPage
 from .library import Library, MediaItem, MediaRow, is_media_path
 from .prefs import PreferencesDialog
 from .queue import QueuePage
+from .deps import DependencyGuide
 from .tools import ToolsPage
 
 # what we can assume before the real (slower) encoder probe finishes
@@ -68,6 +69,10 @@ class Context:
 
     def add_paths(self, paths, select=False):
         return self.win.add_paths(paths, select=select)
+
+    def install_decoders(self):
+        """Open the guided installer for the preview decoders (player notice button)."""
+        self.win.deps.offer_decoders()
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -228,6 +233,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.queue_page_ref = self.stack.add_titled_with_icon(self.queue_page, "queue", "Queue",
                                                               "view-list-symbolic")
         self.pages = (self.inspect, self.fix, self.edit, self.tools)
+        self.deps = DependencyGuide(self)
         tv.set_content(self.stack)
         # Alt+1…5 switch pages
         keys = Gtk.ShortcutController(scope=Gtk.ShortcutScope.MANAGED)

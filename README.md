@@ -147,12 +147,16 @@ FFmpeg log for each job.
 
 Clipdeck currently runs from a source checkout on Linux. It uses **Python 3.10+**,
 **GTK4**, **libadwaita 1.7+**, **PyGObject**, **FFmpeg**, and **ffprobe**.
-Video previews also need the relevant GStreamer decoders.
+Video previews play through GStreamer (processing uses FFmpeg), so the GStreamer
+`libav` decoders are needed too. If anything is missing, Clipdeck says so on launch
+and offers to install it with your system's normal password prompt (through
+PackageKit, or pkexec where PackageKit is absent). The installer below asks the
+same question up front.
 
 On Debian/Ubuntu systems whose repositories provide those versions:
 
 ```bash
-sudo apt install git ffmpeg python3-gi gir1.2-adw-1 gstreamer1.0-libav
+sudo apt install git ffmpeg python3-gi gir1.2-adw-1 gstreamer1.0-libav gstreamer1.0-plugins-bad
 
 git clone https://github.com/VincentAZ/clipdeck.git
 cd clipdeck
@@ -264,7 +268,7 @@ Uninstalling leaves preferences in `~/.config/clipdeck` and thumbnails in
 | libadwaita version check fails | Clipdeck requires 1.7 or newer. Installing the package on an older distribution does not guarantee a sufficiently recent version. |
 | `clipdeck: command not found` | Open it from the application menu, run `~/.local/bin/clipdeck` with the default install, or run `python3 -m clipdeck` from the checkout. Ensure the launcher directory is on `PATH`. |
 | Launcher stopped working after moving the checkout | Run `./install.sh` again from its new location. The launcher points to the checkout used at installation time. |
-| Preview is blank or cannot play a codec | Check GStreamer decoder availability, including `gstreamer1.0-libav`. Preview playback and FFmpeg processing use different media stacks. |
+| Preview says it can't play a codec | Click **Install decoders…** in the player (or accept the offer on launch). Clipdeck installs the GStreamer decoders through PackageKit or pkexec, then reloads the preview, or tells you if a restart is needed. If neither is available, the dialog shows the exact command, for Ubuntu `sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-bad`. Preview playback (GStreamer) and processing (FFmpeg) are separate stacks, so conversions keep working meanwhile. |
 | GPU encoding is unavailable or fails | NVENC needs a supported NVIDIA GPU, working drivers, and an FFmpeg build with that encoder. Disable **Use GPU (NVENC)** to use CPU encoding. |
 | A job fails or creates a `.BAD` file | Open its Queue log to see the command, verification failures, and warnings. Inspect the retained file; a failed result is not presented as successful. |
 | Replace originals could not move a file | Check the job warning and desktop Trash support (`gio trash`). The original is kept if trashing fails. |

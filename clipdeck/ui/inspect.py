@@ -26,6 +26,7 @@ class InspectPage(Gtk.Box):
         # single clip: player on top, details below
         single = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.player = Player(height=300)
+        self.player.on_install = ctx.install_decoders
         self.player.set_margin_start(12)
         self.player.set_margin_end(12)
         self.player.set_margin_top(12)
@@ -76,7 +77,8 @@ class InspectPage(Gtk.Box):
         if not self.get_mapped():
             return
         it = self.items[0] if len(self.items) == 1 else None
-        self.player.load(it.path if it and it.ready and it.info.has_video else None)
+        self.player.load(it.path if it and it.ready and it.info.has_video else None,
+                         it.info if it and it.ready else None)
         self.player.set_visible(bool(it and it.ready and it.info.has_video))
 
     def _show_multi(self, items):

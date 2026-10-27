@@ -42,7 +42,11 @@ class FrameActions(Gtk.Box):
     def _save(self, *_):
         info, crop = self.info, self.crop
         stream = self.player.video.get_media_stream()
-        if self._busy or info is None or self.player.path != info.path or stream is None:
+        if self._busy or info is None or self.player.path != info.path:
+            return
+        if stream is None:
+            self.ctx.toast("No preview to take a frame from. Install the GStreamer decoders "
+                           "shown in the player, then restart Clipdeck.")
             return
         self.player.pause()
         self._busy = True

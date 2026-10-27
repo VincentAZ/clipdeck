@@ -24,19 +24,40 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
-missing=()
-command -v ffmpeg  >/dev/null || missing+=(ffmpeg)
-command -v ffprobe >/dev/null || missing+=(ffprobe)
-python3 - <<'PY' || missing+=("python3-gi gir1.2-adw-1 (GTK4 + libadwaita >= 1.7)")
+missing=()      # things Clipdeck cannot run without
+packages=()     # the apt packages that provide them
+command -v ffmpeg  >/dev/null || { missing+=(ffmpeg);  packages+=(ffmpeg); }
+command -v ffprobe >/dev/null || { missing+=(ffprobe); packages+=(ffmpeg); }
+python3 - <<'PY' || { missing+=("GTK4 + libadwaita >= 1.7 Python bindings"); packages+=(python3-gi gir1.2-adw-1); }
 import gi
 gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
 from gi.repository import Adw
 assert (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 7)
 PY
-if [ ${#missing[@]} -gt 0 ]; then
-    echo "Missing: ${missing[*]}" >&2
-    echo "On Ubuntu: sudo apt install ffmpeg python3-gi gir1.2-adw-1 gstreamer1.0-libav" >&2
-    exit 1
+# Previews play through GStreamer (ffmpeg only does the processing). Without the libav
+# plugin, H.264/AAC clips convert fine but show a notice instead of a preview. The app
+# can install this itself later, but doing it here means it just works on first launch.
+decoders_ok=1
+if ! PYTHONPATH="$HERE" python3 -c "import sys; from clipdeck import decoders; sys.exit(1 if decoders.common_missing() else 0)" 2>/dev/null; then
+    decoders_ok=0
+    packages+=(gstreamer1.0-libav gstreamer1.0-plugins-bad)
+fi
+
+if [ ${#packages[@]} -gt 0 ]; then
+    pkgs=$(printf '%s\n' "${packages[@]}" | sort -u | tr '\n' ' ')
+    [ ${#missing[@]} -gt 0 ] && echo "Missing: ${missing[*]}" >&2
+    [ $decoders_ok = 0 ] && echo "No GStreamer decoder for H.264/AAC: video previews would not play." >&2
+    if command -v apt-get >/dev/null && [ -t 0 ]; then
+        read -r -p "Install them now with sudo apt (${pkgs})? [Y/n] " answer
+        case "${answer:-Y}" in
+            [Yy]*) sudo apt-get install -y $pkgs ;;
+            *) echo "Skipped. Install later with: sudo apt install $pkgs" >&2
+               [ ${#missing[@]} -gt 0 ] && exit 1 ;;
+        esac
+    else
+        echo "On Ubuntu/Debian: sudo apt install $pkgs" >&2
+        [ ${#missing[@]} -gt 0 ] && exit 1
+    fi
 fi
 
 mkdir -p "$BIN_DIR" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"

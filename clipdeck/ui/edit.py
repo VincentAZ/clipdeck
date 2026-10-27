@@ -90,6 +90,7 @@ class EditPage(Gtk.Box):
                        margin_end=12, margin_top=12, margin_bottom=12)
         left.set_size_request(340, -1)
         self.player = Player(height=120)
+        self.player.on_install = ctx.install_decoders
         preview = Gtk.AspectFrame(ratio=16 / 9, obey_child=False)
         overlay = Gtk.Overlay(child=self.player)
         self.crop_overlay = CropOverlay(self._set_crop)
@@ -627,7 +628,7 @@ class EditPage(Gtk.Box):
                 self.player.load(None)       # removed from the selection: let the file go
             return
         first = next((i for i in self.items if i.ready and i.info.has_video), None)
-        self.player.load(first.path if first else None)
+        self.player.load(first.path if first else None, first.info if first else None)
         self._sync_visibility()
 
     def _plans(self):

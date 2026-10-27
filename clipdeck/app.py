@@ -15,6 +15,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import APP_ID, __version__  # noqa: E402
+from . import decoders  # noqa: E402
 from .media import have_tools  # noqa: E402
 from .settings import Settings  # noqa: E402
 
@@ -35,6 +36,8 @@ CSS = """
 .plan-card { padding: 14px; }
 .player video, .player { border-radius: 10px; }
 .player { background-color: black; }
+.player-notice { color: white; }
+.player-notice .caption { color: alpha(white, 0.75); }
 """
 
 
@@ -90,6 +93,8 @@ class ClipdeckApp(Adw.Application):
             self.win.connect("destroy", lambda *_: setattr(self, "win", None))
             if not have_tools():
                 GLib.idle_add(self._missing_tools)
+            elif decoders.common_missing():
+                GLib.idle_add(self._missing_decoders)
         return self.win
 
     def do_activate(self):
@@ -103,11 +108,11 @@ class ClipdeckApp(Adw.Application):
             win.add_paths(paths, select=True)
 
     def _missing_tools(self):
-        dlg = Adw.AlertDialog(heading="ffmpeg is not installed",
-                              body="Clipdeck uses ffmpeg and ffprobe for everything. Install "
-                                   "them with:\n\nsudo apt install ffmpeg")
-        dlg.add_response("ok", "OK")
-        dlg.present(self.win)
+        self.win.deps.offer_ffmpeg()
+        return False
+
+    def _missing_decoders(self):
+        self.win.deps.offer_decoders(decoders.common_missing())
         return False
 
     def _about(self):
