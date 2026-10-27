@@ -38,6 +38,9 @@ CSS = """
 .player { background-color: black; }
 .player-notice { color: white; }
 .player-notice .caption { color: alpha(white, 0.75); }
+.viewer { background-color: black; }
+.player.fullscreen, .player.fullscreen video { border-radius: 0; }
+.viewer-bar { border-radius: 12px; padding: 4px 8px; }
 """
 
 

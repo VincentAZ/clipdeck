@@ -27,6 +27,7 @@ class InspectPage(Gtk.Box):
         single = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.player = Player(height=300)
         self.player.on_install = ctx.install_decoders
+        self.player.on_fullscreen = ctx.fullscreen
         self.player.set_margin_start(12)
         self.player.set_margin_end(12)
         self.player.set_margin_top(12)

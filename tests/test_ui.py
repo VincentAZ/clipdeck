@@ -59,6 +59,16 @@ def scenario(app, win):
     def page(name):
         win.stack.set_visible_child_name(name)
 
+    def offer(resp):
+        """Answer the 'edited clip saved' dialog that follows a new-file edit."""
+        dlg = win.get_visible_dialog()
+        heading = dlg.get_heading() if dlg is not None else None
+        check(heading is not None and (heading.startswith("Saved ") or
+                                       heading.endswith("edited clips saved")),
+              f"library offer dialog expected, got {heading!r}")
+        dlg.emit("response", resp)
+        dlg.close()
+
     yield 1.0
     screenshot(win, f"{SHOTS}/ui-00-empty.png")
 
@@ -144,6 +154,15 @@ def scenario(app, win):
     job = win.queue.jobs[-1]
     check(job.state == DONE, f"lossless frame rate: {job.result.failures if job.result else ''}")
     check(abs(probe(job.result.output).fps - 24) < 0.01, "lossless output rate")
+    # a new file is offered to the library once the queue drains
+    yield 0.4
+    n_lib = len(win.library)
+    offer("add")
+    yield 0.4
+    added = win.library.find(job.result.output)
+    check(added is not None and len(win.library) == n_lib + 1, "edited clip added to library")
+    check(win.selected_items() == [added], "added clip is selected")
+    select("upright.mp4")
     e.fps_lossless.set_active(False)
     e.fps.set_key("0")
     page("edit")
@@ -180,6 +199,12 @@ def scenario(app, win):
     job = win.queue.jobs[-1]
     check(job.state == DONE, f"rotate job {job.result.failures if job.result else ''}")
     check(fixtures.red_corner(job.result.output) == "TR", "rotated output orientation")
+    yield 0.4
+    n_lib = len(win.library)
+    offer("later")
+    yield 0.3
+    check(len(win.library) == n_lib and win.library.find(job.result.output) is None,
+          "Not Now must leave the library alone")
     page("edit")
     yield 0.3
     e.rot.set_active_name("0")
@@ -198,6 +223,8 @@ def scenario(app, win):
     yield idle()
     job = win.queue.jobs[-1]
     check(job.state == DONE and abs(probe(job.result.output).duration - 1.5) < 0.1, "trim")
+    yield 0.4
+    offer("later")
     page("edit")
     e.trim.set_enable_expansion(False)
 
@@ -214,9 +241,67 @@ def scenario(app, win):
     yield idle()
     job = win.queue.jobs[-1]
     check(job.state == DONE and probe(job.result.output).rotation == -90, "lossless rotate")
+    yield 0.4
+    offer("later")
     page("edit")
     e.lossless.set_active(False)
     e.rot.set_active_name("0")
+
+    # ---------------------------------------------------------------- save as
+    # Replace original: the edited clip takes the original's name and library entry
+    select("Tom & Jerry <1>.mp4")
+    tj = items_named("Tom & Jerry <1>.mp4")[0]
+    yield 0.4
+    e.preset.set_key("share")
+    e.rot.set_active_name("90")
+    e.save_mode.set_active_name("replace")
+    yield 0.5
+    check(e.queue_btn.get_label() == "Add to queue (original to Trash)", e.queue_btn.get_label())
+    check(e.out_label.get_label() == "→ Tom & Jerry <1>.mp4 (replaces the original)",
+          e.out_label.get_label())
+    check(e.preset.get_key() == "share", "save mode is not part of the preset")
+    screenshot(win, f"{SHOTS}/ui-06b-edit-replace.png")
+    e.queue_btn.emit("clicked")
+    yield idle()
+    job = win.queue.jobs[-1]
+    check(job.state == DONE, f"replace job {job.result.failures if job.result else ''}")
+    check(job.result.replaced_original == tj.path and job.result.output == tj.path,
+          (job.result.replaced_original, job.result.output))
+    yield Wait(lambda: tj.ready and tj.info.display_size == (180, 320), "entry re-read", 30)
+    check(win.library.find(tj.path) is tj, "the library entry was kept")
+    check("Tom & Jerry <1>.mp4" in os.listdir(trash_dir), "original went to the Trash")
+    yield 0.4
+    check(win.get_visible_dialog() is None, "a replacement is not offered to the library")
+    e.save_mode.set_active_name("new")
+    e.rot.set_active_name("0")
+    e.preset.set_key("custom")
+    yield 0.3
+    check(e.queue_btn.get_label() == "Add to queue", e.queue_btn.get_label())
+    # New file, then "Replace in Library": the edit takes the original's place in the
+    # list and the original file stays on disk
+    pos = win.library.position(tj)
+    e.trim.set_enable_expansion(True)
+    e.t_start.set_text("0:00.5")
+    e.t_end.set_text("2")
+    yield 0.4
+    e.queue_btn.emit("clicked")
+    yield idle()
+    job = win.queue.jobs[-1]
+    check(job.state == DONE, f"trim for replace {job.result.failures if job.result else ''}")
+    yield 0.4
+    n_lib = len(win.library)
+    offer("replace")
+    yield 0.4
+    new = win.library.find(job.result.output)
+    check(new is not None and win.library.find(tj.path) is None,
+          "the trimmed clip should take the original's place in the library")
+    check(win.library.position(new) == pos, f"position {win.library.position(new)} != {pos}")
+    check(os.path.exists(tj.path), "the original file must be kept")
+    check(len(win.library) == n_lib, "library size changed by a replace")
+    check(win.selected_items() == [new], "the replacement should be selected")
+    e.trim.set_enable_expansion(False)
+    e.t_start.set_text("")
+    e.t_end.set_text("")
 
     # crop detection on the letterboxed clip
     select("letterbox.mp4")
@@ -367,6 +452,9 @@ def scenario(app, win):
     # ---------------------------------------------------------------- quit while busy
     select("long.mp4")
     page("edit")
+    e.preset.set_key("small")      # a slow encode: it must still be running at close
+    e.speedp.set_key("best")
+    yield 0.4
     e.queue_btn.emit("clicked")
     yield Wait(lambda: win.queue.active_count() > 0, "busy")
     win.close()
@@ -402,6 +490,19 @@ class CropUITest(unittest.TestCase):
             self.skipTest("xvfb-run not installed")
         res = subprocess.run(["xvfb-run", "-a", "-s", "-screen 0 1600x1000x24",
                               sys.executable, "-m", "tests.test_crop"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(res.returncode, 0, res.stderr[-6000:])
+        noisy = [line for line in res.stderr.splitlines()
+                 if ("-WARNING" in line or "-CRITICAL" in line) and "DRI3" not in line]
+        self.assertEqual(noisy, [], "\n".join(noisy[:20]))
+
+
+class FullscreenUITest(unittest.TestCase):
+    def test_fullscreen_navigation(self):
+        if not shutil.which("xvfb-run"):
+            self.skipTest("xvfb-run not installed")
+        res = subprocess.run(["xvfb-run", "-a", "-s", "-screen 0 1600x1000x24",
+                              sys.executable, "-m", "tests.test_fullscreen"], cwd=ROOT,
                              capture_output=True, text=True, timeout=120)
         self.assertEqual(res.returncode, 0, res.stderr[-6000:])
         noisy = [line for line in res.stderr.splitlines()

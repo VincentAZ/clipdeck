@@ -34,6 +34,12 @@ gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
 from gi.repository import Adw
 assert (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 7)
 PY
+# The trim timeline and crop overlay draw with cairo; without this bridge every draw
+# raises and both tools stay blank.
+python3 - <<'PY' || { missing+=("PyGObject cairo bridge"); packages+=(python3-gi-cairo); }
+import gi
+gi.require_foreign("cairo")
+PY
 # Previews play through GStreamer (ffmpeg only does the processing). Without the libav
 # plugin, H.264/AAC clips convert fine but show a notice instead of a preview. The app
 # can install this itself later, but doing it here means it just works on first launch.

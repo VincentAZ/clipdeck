@@ -55,7 +55,18 @@ class Player(Gtk.Box):
         self.append(self.stack)
         self.video = Gtk.Video(autoplay=False, loop=False)
         self.video.set_vexpand(True)
-        self.stack.add_named(self.video, "video")
+        # the video sits in an overlay so a full-screen button can float over its corner
+        self.overlay = Gtk.Overlay(child=self.video)
+        self.fullscreen_btn = Gtk.Button(icon_name="view-fullscreen-symbolic",
+                                         tooltip_text="Full screen (F11)",
+                                         halign=Gtk.Align.END, valign=Gtk.Align.START,
+                                         margin_top=8, margin_end=8, visible=False)
+        self.fullscreen_btn.add_css_class("osd")
+        self.fullscreen_btn.add_css_class("circular")
+        self.fullscreen_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Full screen"])
+        self.fullscreen_btn.connect("clicked", self._fullscreen)
+        self.overlay.add_overlay(self.fullscreen_btn)
+        self.stack.add_named(self.overlay, "video")
 
         notice = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
                          valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER,
@@ -80,6 +91,8 @@ class Player(Gtk.Box):
         self.command: str | None = None
         # set by the page: opens the guided installer (see ui/deps.py)
         self.on_install = None
+        # set by the page: opens the full-screen viewer; gets this player
+        self.on_fullscreen = None
         self._stream = None
         self._error_handler = None
 
@@ -94,6 +107,7 @@ class Player(Gtk.Box):
                 stream.pause()
             except Exception:  # noqa: BLE001 - stream may already be gone
                 pass
+        self.fullscreen_btn.set_visible(False)
         if not path:
             self.video.set_media_stream(None)
             self.stack.set_visible_child_name("video")
@@ -111,6 +125,7 @@ class Player(Gtk.Box):
         self.stack.set_visible_child_name("video")
         self.video.set_file(Gio.File.new_for_path(path))
         self._watch(self.video.get_media_stream())
+        self.fullscreen_btn.set_visible(self.on_fullscreen is not None)
 
     def _watch(self, stream):
         """Turn a playback error into a readable notice instead of the ⊗ icon."""
@@ -139,6 +154,7 @@ class Player(Gtk.Box):
 
     def _show_notice(self, title: str, body: str, command: str | None):
         self.command = command
+        self.fullscreen_btn.set_visible(False)
         self.notice_title.set_label(title)
         self.notice_body.set_label(body)
         self.fix_btn.set_visible(command is not None)
@@ -153,6 +169,10 @@ class Player(Gtk.Box):
             self.fix_btn.set_label("Copied")
             GLib.timeout_add(1500, lambda: self.fix_btn.set_label("Copy install command")
                              or False)
+
+    def _fullscreen(self, *_):
+        if self.on_fullscreen is not None and self.path:
+            self.on_fullscreen(self)
 
     def reload(self):
         """Open the file again (it was replaced on disk under the same name)."""

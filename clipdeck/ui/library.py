@@ -77,7 +77,9 @@ class Library:
                 out.append(p)
         return out
 
-    def add_paths(self, paths: list[str]) -> list[MediaItem]:
+    def add_paths(self, paths: list[str], at: int | None = None) -> list[MediaItem]:
+        """Add files (folders contribute their media files); `at` inserts them at that
+        position instead of the end."""
         known = {it.path for it in self.items()}
         added = []
         for p in self.expand(paths):
@@ -89,7 +91,7 @@ class Library:
         if added:
             # one store change for the whole batch, not one per file
             n = self.store.get_n_items()
-            self.store.splice(n, 0, added)
+            self.store.splice(n if at is None else max(0, min(n, at)), 0, added)
             for item in added:
                 _pool.submit(self._probe, item)
         return added
@@ -99,6 +101,10 @@ class Library:
             found, pos = self.store.find(it)
             if found:
                 self.store.remove(pos)
+
+    def position(self, item: MediaItem) -> int | None:
+        found, pos = self.store.find(item)
+        return pos if found else None
 
     def refresh(self, item: MediaItem):
         item.state = PROBING

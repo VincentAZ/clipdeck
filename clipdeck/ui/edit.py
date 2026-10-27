@@ -91,6 +91,7 @@ class EditPage(Gtk.Box):
         left.set_size_request(340, -1)
         self.player = Player(height=120)
         self.player.on_install = ctx.install_decoders
+        self.player.on_fullscreen = ctx.fullscreen
         preview = Gtk.AspectFrame(ratio=16 / 9, obey_child=False)
         overlay = Gtk.Overlay(child=self.player)
         self.crop_overlay = CropOverlay(self._set_crop)
@@ -177,6 +178,20 @@ class EditPage(Gtk.Box):
         # output
         g = Adw.PreferencesGroup(title="Output")
         page.add(g)
+        self.save_row = Adw.ActionRow(title="Save as")
+        self.save_row.set_use_markup(False)
+        self.save_mode = Adw.ToggleGroup(valign=Gtk.Align.CENTER, can_shrink=False)
+        self.save_mode.add(Adw.Toggle(name="new", label="New file",
+                                      tooltip="Keep the original and save the edited clip "
+                                              "beside it"))
+        self.save_mode.add(Adw.Toggle(name="replace", label="Replace original",
+                                      tooltip="Trash the original once the edited clip has "
+                                              "been verified"))
+        self.save_mode.set_active_name("new")
+        self.save_mode.connect("notify::active-name", lambda *_: self._save_mode_changed())
+        self.save_row.add_suffix(self.save_mode)
+        g.add(self.save_row)
+        self._save_mode_changed()
         self.fmt = KeyCombo("Format", [(f.key, f.label) for f in FORMATS.values()])
         self.vcodec = KeyCombo("Video codec", [])
         self.acodec = KeyCombo("Audio codec", [])
@@ -380,6 +395,19 @@ class EditPage(Gtk.Box):
         bp.add_setter(self.paned, "position", 360 if short else 560)
         bp.add_setter(self.player.video, "height-request", 100 if short else 150)
 
+    @property
+    def replacing(self) -> bool:
+        return self.save_mode.get_active_name() == "replace"
+
+    def _save_mode_changed(self):
+        self.save_row.set_subtitle(
+            "The original goes to the Trash once the edit verifies; the edit takes its "
+            "place in the library" if self.replacing else
+            "The original is kept; when the edit is saved you choose whether it joins the "
+            "library or takes the original's place")
+        if hasattr(self, "strip"):      # the form is complete: re-plan
+            self._changed()
+
     def _remember_gpu(self):
         if self.ctx.settings.gpu != self.gpu.get_active():
             self.ctx.settings.gpu = self.gpu.get_active()
@@ -569,6 +597,7 @@ class EditPage(Gtk.Box):
             r.normalize_audio = self.norm.get_active()
             r.volume_db = float(self.vol.get_value())
         r.strip_metadata = self.strip.get_active()
+        r.replace_original = self.replacing
         if f.kind == "gif":
             r.gif_fps = float(self.gif_fps.get_key())
             r.gif_width = int(self.gif_w.get_key())
@@ -661,7 +690,7 @@ class EditPage(Gtk.Box):
         if plans:
             p = plans[0]
             more = f"  (+{len(plans) - 1} more)" if len(plans) > 1 else ""
-            self.out_label.set_label(f"→ {os.path.basename(p.output)}{more}")
+            self.out_label.set_label(f"→ {self._final_name(p)}{more}")
             lines = list(p.summary)
             if p.expect.duration:
                 lines.append(f"Result length {fmt_duration(p.expect.duration)}")
@@ -686,10 +715,28 @@ class EditPage(Gtk.Box):
         self.queue_btn.set_sensitive(n > 0)
         total = len(self.items)
         if n == total:
-            self.queue_btn.set_label("Add to queue" if n == 1 else f"Add {n} clips to queue")
+            label = "Add to queue" if n == 1 else f"Add {n} clips to queue"
         else:
-            self.queue_btn.set_label(f"Add {n} of {total} to queue")
+            label = f"Add {n} of {total} to queue"
+        if self.replacing and n:
+            label += f" (original{'s' if n != 1 else ''} to Trash)"
+        self.queue_btn.set_label(label)
         return False
+
+    @staticmethod
+    def _final_name(p) -> str:
+        """What the output will be called once the job is done: a replacement saved
+        beside its original in the same format takes over the original's name."""
+        name = os.path.basename(p.output)
+        if not p.replace_original:
+            return name
+        src = p.inputs[0].path
+        same_dir = os.path.dirname(os.path.abspath(src)) == os.path.dirname(
+            os.path.abspath(p.output))
+        same_ext = os.path.splitext(src)[1].lower() == os.path.splitext(p.output)[1].lower()
+        if same_dir and same_ext:
+            name = os.path.basename(src)
+        return f"{name} (replaces the original)"
 
     def run(self):
         try:
@@ -698,7 +745,9 @@ class EditPage(Gtk.Box):
             self.ctx.toast(str(e))
             return
         for p in plans:
-            self.ctx.submit(p)
+            # a new file is offered to the library when it is done; a replacement takes
+            # the original's place by itself
+            self.ctx.submit(p, offer=not p.replace_original)
         if plans:
             self.ctx.toast(f"Queued {len(plans)} job{'s' if len(plans) != 1 else ''}")
             self.ctx.show_queue()

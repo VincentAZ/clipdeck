@@ -50,6 +50,8 @@ installed media tools.
 | **Adjust timing and sound** | Change frame rate or speed; mute, normalize, boost, or extract audio. |
 | **Finish small media jobs** | Join compatible clips losslessly, re-encode mixed clips, save full-resolution frames, build contact sheets, or make GIFs. |
 | **Control the export** | Strip metadata, choose an output folder, use available NVIDIA NVENC encoders, and run jobs in parallel. |
+| **Watch and sort** | Play any clip full screen and step through the whole library with the arrow keys. |
+| **Keep the library current** | Save an edit as a new file and add it to the library, or let it take the original's place; or replace the original outright, which trashes it after verification. |
 
 ## Screenshot tour
 
@@ -62,7 +64,10 @@ from the current application with generated, non-personal demo clips.
 ![Inspect showing the video preview, dimensions, duration, and media details for a demo clip](docs/images/inspect.png)
 
 Inspect combines playback with file and stream details, detected issues, and a
-full-resolution PNG frame-export button.
+full-resolution PNG frame-export button. The button in the preview's corner (or
+<kbd>F11</kbd>) plays the clip full screen from the same position; there, the
+arrow keys step through every playable clip in the library and <kbd>Esc</kbd>
+returns to the clip you were watching.
 
 ### Quick Fix: diagnose first, then fix in a batch
 
@@ -135,8 +140,13 @@ An FFmpeg process exiting successfully is only the beginning of a successful job
 - **Keep existing files.** New outputs get an available name, such as
   `clip (2).mp4`. A file that fails verification is kept with a `.BAD` marker for
   inspection and the job is reported as failed.
-- **Replace deliberately.** When you enable *Replace originals*, the original
-  moves to the desktop Trash only after the new file passes verification.
+- **Replace deliberately.** When you enable *Replace originals* in Quick Fix or
+  choose *Save as: Replace original* in Edit & Convert, the original moves to the
+  desktop Trash only after the new file passes verification, and the new file
+  takes the original's place in the library.
+- **Decide afterwards.** An edit saved as a new file is offered to the library
+  when it is done: add it beside the original, let it take the original's place in
+  the list (the original file stays on disk), or leave the library as it is.
 - **Clean up interrupted work.** Cancellation and normal shutdown remove partial
   files. A journal lets the next launch clean up work left by a crash.
 
@@ -156,7 +166,7 @@ same question up front.
 On Debian/Ubuntu systems whose repositories provide those versions:
 
 ```bash
-sudo apt install git ffmpeg python3-gi gir1.2-adw-1 gstreamer1.0-libav gstreamer1.0-plugins-bad
+sudo apt install git ffmpeg python3-gi python3-gi-cairo gir1.2-adw-1 gstreamer1.0-libav gstreamer1.0-plugins-bad
 
 git clone https://github.com/VincentAZ/clipdeck.git
 cd clipdeck
@@ -199,6 +209,17 @@ Drag the trim handles or enter start/end times. Enable Crop to draw and repositi
 a selection, or use an aspect shortcut. Check the preview and summary, then add
 the job to the queue. With several clips selected, the settings apply as a batch;
 the preview comes from the first usable selected video.
+
+**Edit a clip in place.** In Edit & Convert, *Save as* decides what happens to the
+original. *New file* keeps it and, once the edit is saved, asks whether to add
+the result to the library or let it replace the original in the list. *Replace
+original* trashes the original after the edited clip verifies; in the same
+format the edited clip takes over the original's name.
+
+**Review a shoot.** Click the full-screen button on any preview, or press
+<kbd>F11</kbd>, then use <kbd>←</kbd> and <kbd>→</kbd> to move through the
+library (audio-only files are skipped), <kbd>Space</kbd> to pause, and
+<kbd>Esc</kbd> to come back with that clip selected.
 
 **Join a sequence.** Select at least two clips and open Tools. Use the arrow
 controls to put them in order. Compatible clips can be joined without re-encoding;
@@ -265,6 +286,7 @@ Uninstalling leaves preferences in `~/.config/clipdeck` and thumbnails in
 | --- | --- |
 | Installer reports missing tools | Install FFmpeg, ffprobe, PyGObject, and the GTK4/libadwaita packages above. Check `ffmpeg -version` and `ffprobe -version`. |
 | `No module named gi` | Use the system Python with the distribution's `python3-gi` package. An isolated virtual environment may not see system GI bindings. |
+| Trim timeline or crop overlay stays blank, or the log says `Couldn't find foreign struct converter for 'cairo.Context'` | Install `python3-gi-cairo` (the PyGObject cairo bridge). `./install.sh` checks for it and offers to install it. |
 | libadwaita version check fails | Clipdeck requires 1.7 or newer. Installing the package on an older distribution does not guarantee a sufficiently recent version. |
 | `clipdeck: command not found` | Open it from the application menu, run `~/.local/bin/clipdeck` with the default install, or run `python3 -m clipdeck` from the checkout. Ensure the launcher directory is on `PATH`. |
 | Launcher stopped working after moving the checkout | Run `./install.sh` again from its new location. The launcher points to the checkout used at installation time. |
@@ -280,6 +302,10 @@ Uninstalling leaves preferences in `~/.config/clipdeck` and thumbnails in
 | --- | --- |
 | <kbd>Ctrl</kbd> + <kbd>O</kbd> | Add videos |
 | <kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>5</kbd> | Switch pages |
+| <kbd>F11</kbd> | Play the previewed (or selected) clip full screen |
+| <kbd>←</kbd> / <kbd>→</kbd>, <kbd>Home</kbd> / <kbd>End</kbd> | Full screen: previous / next clip, first / last clip |
+| <kbd>Space</kbd> | Full screen: pause or resume |
+| <kbd>Esc</kbd> | Leave full screen, selecting the clip that was playing |
 | <kbd>Delete</kbd> | Remove selected clips from the focused library list; keep the files |
 | <kbd>Ctrl</kbd> + <kbd>,</kbd> | Preferences |
 | <kbd>Ctrl</kbd> + <kbd>Q</kbd> | Quit |
@@ -294,7 +320,7 @@ python3 -m clipdeck
 
 The engine tests create synthetic media and exercise real FFmpeg operations.
 The UI tests drive the actual GTK app under Xvfb, including crop, trim, frame
-saving, queue operations, and window layouts.
+saving, full-screen playback, queue operations, and window layouts.
 
 ```bash
 # Xvfb is needed for the headless UI checks.

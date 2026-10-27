@@ -13,6 +13,7 @@ from ..ops import Plan
 from ..settings import Settings
 from .edit import EditPage
 from .fix import FixPage
+from .fullscreen import FullscreenViewer
 from .inspect import InspectPage
 from .library import Library, MediaItem, MediaRow, is_media_path
 from .prefs import PreferencesDialog
@@ -52,8 +53,13 @@ class Context:
             self._warned_missing = False
         return s.out_dir
 
-    def submit(self, plan: Plan, after: Job | None = None) -> Job:
-        return self.queue.submit(plan, after=after)
+    def submit(self, plan: Plan, after: Job | None = None, offer: bool = False) -> Job:
+        """Queue a plan. With `offer`, the finished file is offered to the library
+        (add it, or let it take its original's place) once the queue drains."""
+        job = self.queue.submit(plan, after=after)
+        if offer:
+            self.win.offer_jobs.add(job.id)
+        return job
 
     def toast(self, text: str):
         self.win.toast(text)
@@ -74,6 +80,12 @@ class Context:
         """Open the guided installer for the preview decoders (player notice button)."""
         self.win.deps.offer_decoders()
 
+    def fullscreen(self, player):
+        """The player's full-screen button: the viewer takes over from where it was."""
+        position = player.position()
+        player.pause()
+        self.win.show_fullscreen(player.path, position)
+
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app, settings: Settings):
@@ -85,7 +97,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._announced: set[int] = set()
         self._closed = False
         self._batch: list[Job] = []          # finished since the queue last drained
+        self.offer_jobs: set[int] = set()    # edits whose result is offered to the library
+        self._offers: list[Job] = []         # those that finished since the last drain
         self._last_toast: Adw.Toast | None = None
+        self._quit_dialog: Adw.AlertDialog | None = None
+        self.viewer: FullscreenViewer | None = None
         self.library = Library(on_item_ready=self._item_ready)
         self.queue = JobQueue(self._job_changed_threadsafe, workers=settings.workers,
                               thorough=lambda: self.settings.thorough)
@@ -113,7 +129,7 @@ class MainWindow(Adw.ApplicationWindow):
             bp.add_setter(self.switcher_bar, "reveal", True)
             self.edit.narrow_setters(bp, short)
             if short:
-                bp.add_setter(self.inspect.player.video, "height-request", 160)
+                bp.add_setter(self.inspect.player.stack, "height-request", 160)
             if collapse:
                 bp.add_setter(self.split, "collapsed", True)
             self.add_breakpoint(bp)
@@ -235,13 +251,16 @@ class MainWindow(Adw.ApplicationWindow):
         self.pages = (self.inspect, self.fix, self.edit, self.tools)
         self.deps = DependencyGuide(self)
         tv.set_content(self.stack)
-        # Alt+1…5 switch pages
+        # Alt+1…5 switch pages, F11 plays full screen
         keys = Gtk.ShortcutController(scope=Gtk.ShortcutScope.MANAGED)
         for n, name in enumerate(("inspect", "fix", "edit", "tools", "queue"), 1):
             keys.add_shortcut(Gtk.Shortcut.new(
                 Gtk.ShortcutTrigger.parse_string(f"<Alt>{n}"),
                 Gtk.CallbackAction.new(lambda *_a, nm=name: self.stack.set_visible_child_name(nm)
                                        or True)))
+        keys.add_shortcut(Gtk.Shortcut.new(
+            Gtk.ShortcutTrigger.parse_string("F11"),
+            Gtk.CallbackAction.new(lambda *_a: self._fullscreen_shortcut())))
         self.add_controller(keys)
 
         self.switcher_bar = Adw.ViewSwitcherBar(stack=self.stack)
@@ -249,8 +268,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.split.set_content(tv)
 
     # ================================================================== library
-    def add_paths(self, paths, select=False) -> list[MediaItem]:
-        added = self.library.add_paths(list(paths))
+    def add_paths(self, paths, select=False, at: int | None = None) -> list[MediaItem]:
+        added = self.library.add_paths(list(paths), at=at)
         if not added:
             existing = [self.library.find(p) for p in paths]
             existing = [e for e in existing if e]
@@ -312,6 +331,81 @@ class MainWindow(Adw.ApplicationWindow):
     def _item_ready(self, item: MediaItem):
         if item in self.selected_items():
             self._selection_changed()
+
+    def _take_place(self, src: str, out: str, select: bool | None = None) -> list[MediaItem]:
+        """`out` takes `src`'s place in the library: same position, same selection state.
+        The file at `src` is not touched. When `src` is not in the library, `out` is
+        simply added."""
+        gone = self.library.find(src)
+        if gone is None:
+            return self.add_paths([out], select=bool(select))
+        if select is None:
+            select = gone in self.selected_items()
+        keep = [i for i in self.selected_items() if i is not gone]
+        at = self.library.position(gone)
+        self.library.remove([gone])
+        added = self.add_paths([out], at=at)
+        if not added:
+            existing = self.library.find(out)
+            added = [existing] if existing else []
+        if select and added:
+            self._select_items(keep + added)
+        return added
+
+    def _players(self):
+        for p in self.pages:
+            if hasattr(p, "player"):
+                yield p.player
+        if self.viewer is not None:
+            yield self.viewer.player
+
+    # ================================================================== full screen
+    def playable_clips(self) -> list[MediaItem]:
+        return [i for i in self.library.items() if i.ready and i.info.has_video]
+
+    def show_fullscreen(self, path: str | None = None, position: float = 0.0):
+        """Play `path` full screen (or the selected clip, or the first one), from
+        `position` seconds in. Left/Right in the viewer step through the library."""
+        clips = self.playable_clips()
+        if not clips:
+            self.toast("Add a video to play it full screen")
+            return
+        start = self.library.find(path) if path else None
+        if start is None or start not in clips:
+            selected = [i for i in self.selected_items() if i in clips]
+            start, position = (selected[0] if selected else clips[0]), 0.0
+        if self.viewer is not None:
+            self.viewer.show(start, position)
+            self.viewer.present()
+            return
+        self.viewer = FullscreenViewer(self, self.playable_clips, start, position,
+                                       on_close=self._viewer_closed,
+                                       on_install=self._viewer_install)
+
+    def _fullscreen_shortcut(self):
+        page = self.stack.get_visible_child()
+        player = getattr(page, "player", None)
+        if player is not None and player.path:
+            self.ctx.fullscreen(player)
+        else:
+            self.show_fullscreen()
+        return True
+
+    def _viewer_install(self):
+        """The viewer's decoder notice: leave full screen, then run the guided installer
+        (its dialogs belong to the main window)."""
+        if self.viewer is not None:
+            self.viewer.close()
+        self.deps.offer_decoders()
+
+    def _viewer_closed(self, item: MediaItem | None):
+        """Leaving the viewer on another clip selects it, so the pages show what the
+        user was just watching."""
+        self.viewer = None
+        if self._closed or item is None:
+            return
+        if self.library.find(item.path) is item and item not in self.selected_items():
+            self._select_items([item])
 
     # ================================================================== dialogs
     def open_files(self):
@@ -390,18 +484,17 @@ class MainWindow(Adw.ApplicationWindow):
         if job.state == DONE and job.result and job.result.replaced_original:
             gone = self.library.find(job.result.replaced_original)
             if gone and os.path.exists(gone.path):
-                self.library.refresh(gone)    # the fixed file took the original's name
-                for p in self.pages:          # players still hold the trashed original
-                    if hasattr(p, "player") and p.player.path == gone.path:
-                        p.player.reload()
+                self.library.refresh(gone)    # the new file took the original's name
+                for player in self._players():   # they still hold the trashed original
+                    if player.path == gone.path:
+                        player.reload()
             elif gone:
-                # new name (format changed): the fixed file takes the original's place
-                was_selected = gone in self.selected_items()
-                self.library.remove([gone])
-                added = self.add_paths([job.result.output])
-                if was_selected and added:
-                    keep = [i for i in self.selected_items()] + added
-                    self._select_items(keep)
+                # new name (format changed): the new file takes the original's place
+                self._take_place(gone.path, job.result.output)
+        if job.id in self.offer_jobs:
+            self.offer_jobs.discard(job.id)
+            if job.state == DONE and job.result and job.result.output:
+                self._offers.append(job)
         if self.queue.active_count() == 0:
             self._announce_batch()
         return False
@@ -421,13 +514,61 @@ class MainWindow(Adw.ApplicationWindow):
             text = f"{len(done)} file{'s' if len(done) != 1 else ''} saved"
             if failed:
                 text += f", {len(failed)} failed"
-        self.toast(text)
+        offers, self._offers = self._offers, []
+        if offers and self._quit_dialog is None and not self._closed:
+            self._offer_to_library(offers, text)
+        else:
+            self.toast(text)      # (while the quit question is up, nothing else interrupts)
         app = self.get_application()
         if app and not self.is_active():
             n = Gio.Notification.new("Clipdeck: all jobs finished")
             n.set_body(f"{text}. Open the Queue for details." if failed
                        else f"{text}. Every output was verified.")
             app.send_notification("all-done", n)
+
+    def _offer_to_library(self, jobs: list[Job], text: str):
+        """Edited clips saved as new files: add them to the library, or let each take
+        its original's place there (the original file stays on disk)."""
+        pairs = [(j.plan.inputs[0].path, j.result.output) for j in jobs]
+        n = len(pairs)
+        originals = [src for src, _ in pairs if self.library.find(src) is not None]
+        if n == 1:
+            src, out = pairs[0]
+            heading = f"Saved {os.path.basename(out)}"
+            body = (f"Add the edited clip to the library, or let it take the place of "
+                    f"{os.path.basename(src)} there? The original file is kept either way.")
+        else:
+            heading = f"{n} edited clips saved"
+            body = ("Add them to the library, or let each take its original's place there? "
+                    "The original files are kept either way.")
+        if text.endswith("failed"):
+            body += f"\n\n{text}. Open the Queue for details."
+        dlg = Adw.AlertDialog(heading=heading, body=body)
+        dlg.add_response("later", "Not Now")
+        dlg.add_response("add", "Add to Library")
+        dlg.add_response("replace", "Replace in Library")
+        dlg.set_response_enabled("replace", bool(originals))
+        dlg.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("add")
+        dlg.set_close_response("later")
+
+        def on_resp(_d, resp):
+            if self._closed:
+                return
+            if resp == "add":
+                added = self.add_paths([out for _, out in pairs], select=True)
+                self.toast(f"Added {len(added)} clip{'s' if len(added) != 1 else ''} "
+                           "to the library" if added else "Already in the library")
+            elif resp == "replace":
+                added = []
+                for src, out in pairs:
+                    added += self._take_place(src, out)
+                if added:
+                    self._select_items(added)
+                self.toast(f"Replaced {n} clip{'s' if n != 1 else ''} in the library; "
+                           f"the original file{'s are' if n != 1 else ' is'} kept")
+        dlg.connect("response", on_resp)
+        dlg.present(self)
 
     def _quit_now(self):
         self._shutdown()
@@ -448,6 +589,8 @@ class MainWindow(Adw.ApplicationWindow):
         """Cancel everything (partial files are removed by the workers) and stop players."""
         self._closed = True
         self.queue.shutdown(wait=8)
+        if self.viewer is not None:
+            self.viewer.close()
         for p in self.pages:
             if hasattr(p, "player"):
                 p.player.load(None)
@@ -474,6 +617,9 @@ class MainWindow(Adw.ApplicationWindow):
                 # explicitly once the response handler has returned
                 GLib.idle_add(self._quit_now)
         dlg.connect("response", on_resp)
+        dlg.connect("closed", lambda d: setattr(self, "_quit_dialog", None)
+                    if self._quit_dialog is d else None)
+        self._quit_dialog = dlg
         dlg.present(self)
         return True
 
