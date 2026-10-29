@@ -352,4 +352,10 @@ or non-sensitive sample files are especially helpful.
 
 ---
 
+## License
+
+The original application code is free and open source under the [MIT License](LICENSE), copyright © 2026 Vincent Serpico. Use it, modify it, redistribute it, or build a business with it; keep the copyright and permission notice with copies or substantial portions of the code.
+
+Third-party software and media retain their own licenses. This MIT grant does not relicense GTK, libadwaita, GStreamer, FFmpeg, codecs, or videos you import.
+
 Built by [VincentAZ](https://github.com/VincentAZ).
