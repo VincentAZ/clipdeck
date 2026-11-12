@@ -2,13 +2,24 @@
 a synthetic camera and microphone (lavfi), checked with ffprobe."""
 
 import os
+import shutil
 import tempfile
 import threading
 import time
 import unittest
 
-# keep the in-progress journal away from a real Clipdeck running beside us
-os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="clipdeck-test-config-")
+# everything these tests write (recordings, and the in-progress journal, kept away from
+# a real Clipdeck running beside us) lives here and is removed afterwards
+TMP = tempfile.mkdtemp(prefix="clipdeck-test-recorder-")
+os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "config")
+
+
+def tearDownModule():
+    shutil.rmtree(TMP, ignore_errors=True)
+
+
+def new_folder() -> str:
+    return tempfile.mkdtemp(prefix="rec-", dir=TMP)
 
 from clipdeck import recorder, runner
 from clipdeck.media import probe
@@ -34,7 +45,7 @@ FAKE_MIC = Microphone("Test tone", "sine=frequency=440:sample_rate=48000", "lavf
 
 def record(seconds: float, mic=FAKE_MIC, cam=FAKE_CAM, folder=None, size=(640, 360)):
     """Record for `seconds` after the first frame; returns (Saved, frames, levels, rc)."""
-    folder = folder or tempfile.mkdtemp(prefix="clipdeck-rec-")
+    folder = folder or new_folder()
     rec = Recording(folder, mic)
     frames, levels, done, out = [], [], threading.Event(), {}
     s = Session(recorder.command(cam, size, mic, rec.tmp), frames.append, levels.append,
@@ -142,7 +153,7 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(saved.warnings, [])
 
     def test_never_overwrites(self):
-        folder = tempfile.mkdtemp(prefix="clipdeck-rec-")
+        folder = new_folder()
         name = recorder.recording_name()
         with open(os.path.join(folder, name), "w") as f:
             f.write("keep me")
@@ -162,7 +173,7 @@ class RecordTest(unittest.TestCase):
 
     def test_broken_camera_saves_nothing(self):
         broken = Camera("Broken", "fake", fake="nosuchsource={w}x{h}")
-        folder = tempfile.mkdtemp(prefix="clipdeck-rec-")
+        folder = new_folder()
         rec = Recording(folder, None)
         done, out = threading.Event(), {}
         s = Session(recorder.command(broken, None, None, rec.tmp), lambda _b: None,

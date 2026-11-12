@@ -349,10 +349,9 @@ sudo apt install xvfb xauth
 python3 -m unittest tests.test_engine
 ```
 
-Current validation: the engine suite runs 150 tests, with two NVENC-dependent
-skips on the development machine. The crop, trim, and frame-export UI tests pass.
-The full UI scenario completes its interaction checks, but its strict warning check
-still reports GStreamer stream-start/segment warnings in the development environment.
+Current validation: the engine and recorder suites run 169 tests (the NVENC tests
+skip on machines without a supported NVIDIA GPU). All six UI suites pass, including
+the full scenario's strict warning check.
 
 | Code | Responsibility |
 | --- | --- |
