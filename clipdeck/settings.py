@@ -22,6 +22,10 @@ class Settings:
     autofix_cfr: bool = False
     autofix_mov: bool = False
     last_dir: str = ""
+    record_camera: str = ""          # device path; "" = the first camera
+    record_size: str = ""            # "1920x1080"; "" = the camera's best
+    record_mic: str = ""             # source name; "" = system default, "none" = no sound
+    record_folder: str = ""          # "" = the Videos folder
 
     @property
     def out_dir(self) -> str | None:

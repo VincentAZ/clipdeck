@@ -9,6 +9,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
 from .. import ops
 from ..jobs import DONE, FAILED, Job, JobQueue
+from ..media import have_tools
 from ..ops import Plan
 from ..settings import Settings
 from .edit import EditPage
@@ -19,6 +20,7 @@ from .library import Library, MediaItem, MediaRow, is_media_path
 from .prefs import PreferencesDialog
 from .queue import QueuePage
 from .deps import DependencyGuide
+from .record import RecordDialog
 from .tools import ToolsPage
 
 # what we can assume before the real (slower) encoder probe finishes
@@ -102,6 +104,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._last_toast: Adw.Toast | None = None
         self._quit_dialog: Adw.AlertDialog | None = None
         self.viewer: FullscreenViewer | None = None
+        self.recorder: RecordDialog | None = None
         self.library = Library(on_item_ready=self._item_ready)
         self.queue = JobQueue(self._job_changed_threadsafe, workers=settings.workers,
                               thorough=lambda: self.settings.thorough)
@@ -149,8 +152,12 @@ class MainWindow(Adw.ApplicationWindow):
         add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add videos (Ctrl+O)")
         add.connect("clicked", lambda *_: self.open_files())
         hb.pack_start(add)
+        rec = Gtk.Button(icon_name="camera-video-symbolic", tooltip_text="Record video (Ctrl+R)")
+        rec.connect("clicked", lambda *_: self.record_video())
+        hb.pack_start(rec)
         menu = Gio.Menu()
         menu.append("Add Folder…", "win.add-folder")
+        menu.append("Record Video…", "win.record")
         menu.append("Select All", "win.select-all")
         menu.append("Remove Selected", "win.remove-selected")
         menu.append("Clear Library", "win.clear-library")
@@ -169,7 +176,14 @@ class MainWindow(Adw.ApplicationWindow):
         b.add_css_class("pill")
         b.add_css_class("suggested-action")
         b.connect("clicked", lambda *_: self.open_files())
-        empty.set_child(b)
+        r = Gtk.Button(label="Record Video…", halign=Gtk.Align.CENTER)
+        r.add_css_class("pill")
+        r.connect("clicked", lambda *_: self.record_video())
+        buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                          halign=Gtk.Align.CENTER)
+        buttons.append(b)
+        buttons.append(r)
+        empty.set_child(buttons)
         empty.add_css_class("compact")
         self.side_stack.add_named(empty, "empty")
 
@@ -214,6 +228,7 @@ class MainWindow(Adw.ApplicationWindow):
                          ("remove-selected", lambda *_: self.remove_selected()),
                          ("clear-library", lambda *_: self.clear_library()),
                          ("open", lambda *_: self.open_files()),
+                         ("record", lambda *_: self.record_video()),
                          ("show-sidebar", lambda *_: self.split.set_show_sidebar(True))):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
@@ -407,6 +422,24 @@ class MainWindow(Adw.ApplicationWindow):
         if self.library.find(item.path) is item and item not in self.selected_items():
             self._select_items([item])
 
+    # ================================================================== recording
+    def record_video(self):
+        if not have_tools():
+            self.deps.offer_ffmpeg()
+            return
+        if self.recorder is not None:
+            return          # already open (it is modal; this is the shortcut repeating)
+        self.recorder = RecordDialog(self)
+        self.recorder.connect("closed", lambda d: setattr(self, "recorder", None)
+                              if self.recorder is d else None)
+        self.recorder.present(self)
+
+    def add_recording(self, path: str, warnings: list[str] = ()):
+        """A finished recording joins the library, selected, and Inspect shows it."""
+        self.add_paths([path], select=True)
+        self.stack.set_visible_child_name("inspect")
+        self.toast(" ".join([f"Saved {os.path.basename(path)}", *warnings]))
+
     # ================================================================== dialogs
     def open_files(self):
         dlg = Gtk.FileDialog(title="Add Videos", modal=True)
@@ -588,6 +621,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _shutdown(self):
         """Cancel everything (partial files are removed by the workers) and stop players."""
         self._closed = True
+        if self.recorder is not None:
+            self.recorder.shutdown()      # a take in progress is finished and kept
         self.queue.shutdown(wait=8)
         if self.viewer is not None:
             self.viewer.close()

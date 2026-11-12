@@ -41,6 +41,10 @@ CSS = """
 .viewer { background-color: black; }
 .player.fullscreen, .player.fullscreen video { border-radius: 0; }
 .viewer-bar { border-radius: 12px; padding: 4px 8px; }
+.rec-pill { background-color: alpha(black, 0.6); color: white; border-radius: 999px;
+            padding: 4px 12px 4px 8px; font-weight: 700; }
+@keyframes rec-blink { 50% { opacity: 0.2; } }
+.rec-dot { color: #ff4040; animation: rec-blink 1.4s ease-in-out infinite; }
 """
 
 
@@ -63,6 +67,7 @@ class ClipdeckApp(Adw.Application):
             if accels:
                 self.set_accels_for_action(f"app.{name}", accels)
         self.set_accels_for_action("win.open", ["<Ctrl>o"])
+        self.set_accels_for_action("win.record", ["<Ctrl>r"])
 
     def do_startup(self):
         Adw.Application.do_startup(self)

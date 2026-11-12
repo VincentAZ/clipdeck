@@ -42,6 +42,7 @@ installed media tools.
 
 | Your task | In Clipdeck |
 | --- | --- |
+| **Record a clip** | Record from a webcam and microphone with a live preview and level meter; the take is checked, saved as H.264/AAC MP4, and added to the library. |
 | **Fix a folder of problem clips** | Quick Fix diagnoses rotation, container, video codec, audio codec, and frame-rate issues, then shows the proposed changes. |
 | **Make a clean cut** | Scrub the preview, drag trim handles, enter precise times, and choose frame-accurate or lossless keyframe cuts. |
 | **Reframe the shot** | Draw and adjust a crop, use aspect-ratio shortcuts, detect black bars, rotate, flip, and resize. |
@@ -200,6 +201,15 @@ single output folder, verification depth, and the number of parallel jobs.
 
 ### Common workflows
 
+**Record from your webcam.** Click the camera button above the library (or press
+<kbd>Ctrl</kbd> + <kbd>R</kbd>). Pick the camera, resolution, and microphone, and
+watch the level meter move when you speak; Clipdeck warns you if the microphone is
+silent (often muted in your sound settings). Press **Record**, then **Stop**. The
+take is checked, saved as `Recording <date> <time>.mp4` in your Videos folder (or
+the folder you choose under *Save to*), added to the library, and selected. Closing
+the window or quitting mid-take saves what was recorded. Choose *None (video only)*
+to record without sound. The preview is mirrored, like a mirror; the recording is not.
+
 **Batch-fix phone clips or recordings.** Add files or a folder, select the clips,
 and open Quick Fix. Read each diagnosis, choose any extra options, then press
 **Fix files**. Clips already considered compatible do not need a repair job.
@@ -235,6 +245,7 @@ frames and produce one JPEG per selected clip.
 | Setting or file | Behavior |
 | --- | --- |
 | Output location | Save beside each original or in one chosen folder. If that folder is unavailable, Clipdeck falls back beside the originals and reports it. |
+| Recordings | Saved to your Videos folder unless you choose another under *Save to*; the camera, resolution, and microphone you last used are remembered. |
 | Thorough verification | Enabled by default; adds decoding and applicable frame-count checks. |
 | Jobs at once | 1–4 parallel jobs; one is the default. More jobs are most useful for stream-copy or GPU work. |
 | Preferences | `~/.config/clipdeck/settings.json` remembers output choices, the last folder, and processing preferences. |
@@ -291,6 +302,10 @@ Uninstalling leaves preferences in `~/.config/clipdeck` and thumbnails in
 | `clipdeck: command not found` | Open it from the application menu, run `~/.local/bin/clipdeck` with the default install, or run `python3 -m clipdeck` from the checkout. Ensure the launcher directory is on `PATH`. |
 | Launcher stopped working after moving the checkout | Run `./install.sh` again from its new location. The launcher points to the checkout used at installation time. |
 | Preview says it can't play a codec | Click **Install decoders…** in the player (or accept the offer on launch). Clipdeck installs the GStreamer decoders through PackageKit or pkexec, then reloads the preview, or tells you if a restart is needed. If neither is available, the dialog shows the exact command, for Ubuntu `sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-bad`. Preview playback (GStreamer) and processing (FFmpeg) are separate stacks, so conversions keep working meanwhile. |
+| Recorder says *No camera found* | Connect a webcam and press **Try Again**. Clipdeck records from Video4Linux cameras (`/dev/video*`). |
+| Recorder says the camera is not allowed | Your account cannot open `/dev/video*`. Copy the command it shows (`sudo usermod -aG video $USER`), run it, then log out and back in. |
+| Recorder says the camera is in use | Another app (a video call, another recorder) holds the camera. Close it and press **Try Again**. |
+| The level meter does not move, or the recorder says no sound is coming in | The microphone is muted or not the one you are using. Unmute it in your sound settings or choose another microphone. |
 | GPU encoding is unavailable or fails | NVENC needs a supported NVIDIA GPU, working drivers, and an FFmpeg build with that encoder. Disable **Use GPU (NVENC)** to use CPU encoding. |
 | A job fails or creates a `.BAD` file | Open its Queue log to see the command, verification failures, and warnings. Inspect the retained file; a failed result is not presented as successful. |
 | Replace originals could not move a file | Check the job warning and desktop Trash support (`gio trash`). The original is kept if trashing fails. |
@@ -301,6 +316,7 @@ Uninstalling leaves preferences in `~/.config/clipdeck` and thumbnails in
 | Shortcut | Action |
 | --- | --- |
 | <kbd>Ctrl</kbd> + <kbd>O</kbd> | Add videos |
+| <kbd>Ctrl</kbd> + <kbd>R</kbd> | Record video |
 | <kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>5</kbd> | Switch pages |
 | <kbd>F11</kbd> | Play the previewed (or selected) clip full screen |
 | <kbd>←</kbd> / <kbd>→</kbd>, <kbd>Home</kbd> / <kbd>End</kbd> | Full screen: previous / next clip, first / last clip |
@@ -320,7 +336,8 @@ python3 -m clipdeck
 
 The engine tests create synthetic media and exercise real FFmpeg operations.
 The UI tests drive the actual GTK app under Xvfb, including crop, trim, frame
-saving, full-screen playback, queue operations, and window layouts.
+saving, full-screen playback, recording (from a synthetic camera and microphone),
+queue operations, and window layouts.
 
 ```bash
 # Xvfb is needed for the headless UI checks.
@@ -343,6 +360,7 @@ still reports GStreamer stream-start/segment warnings in the development environ
 | `clipdeck/ops.py` | Turn an operation into an FFmpeg plan and verification expectations |
 | `clipdeck/runner.py` | Execute, verify, and save results |
 | `clipdeck/jobs.py` | Schedule work, cancellation, and dependencies |
+| `clipdeck/recorder.py` | Find cameras and microphones, record with live preview, save the take |
 | `clipdeck/ui/` | GTK4/libadwaita interface |
 
 Found a problem? [Open an issue](https://github.com/VincentAZ/clipdeck/issues) with
