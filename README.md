@@ -44,7 +44,7 @@ installed media tools.
 | --- | --- |
 | **Record a clip** | Record from a webcam and microphone with a live preview and level meter; the take is checked, saved as H.264/AAC MP4, and added to the library. |
 | **Fix a folder of problem clips** | Quick Fix diagnoses rotation, container, video codec, audio codec, and frame-rate issues, then shows the proposed changes. |
-| **Make a clean cut** | Scrub the preview, drag trim handles, enter precise times, and choose frame-accurate or lossless keyframe cuts. |
+| **Make a clean cut** | Scrub the preview, drag trim handles, enter precise times, and choose frame-accurate or lossless keyframe cuts. Or export just the selected part as its own clip and keep the original whole. |
 | **Reframe the shot** | Draw and adjust a crop, use aspect-ratio shortcuts, detect black bars, rotate, flip, and resize. |
 | **Prepare a file for sharing** | Choose H.264, HEVC, or WebM presets, adjust quality, or target a file size. |
 | **Prepare footage for editing** | Export MOV with PCM audio, DNxHR HQ, or ProRes 422 HQ. |
@@ -219,6 +219,12 @@ Drag the trim handles or enter start/end times. Enable Crop to draw and repositi
 a selection, or use an aspect shortcut. Check the preview and summary, then add
 the job to the queue. With several clips selected, the settings apply as a batch;
 the preview comes from the first usable selected video.
+
+**Export a part of a clip.** In Edit & Convert, drag the trim handles around the
+part you want and press **Export selection**. The part is saved as a new
+`_clip` file with the current output settings; the original is never replaced,
+even when *Save as* is set to *Replace original*. The selection stays put, so you
+can move the handles and export the next part.
 
 **Edit a clip in place.** In Edit & Convert, *Save as* decides what happens to the
 original. *New file* keeps it and, once the edit is saved, asks whether to add

@@ -34,6 +34,25 @@ def scenario(app, win):
     yield 0.3
     assert abs(t.start - 0.5) < 0.001 and t.end == 2
     assert abs(e._valid[0].expect.duration - 1.5) < 0.01
+    # Exporting the selection saves a new clip, even in replace mode, and leaves the form.
+    from clipdeck.jobs import DONE
+    from clipdeck.media import probe
+    e.save_mode.set_active_name('replace')
+    yield 0.3
+    assert e.export_trim.get_sensitive()
+    e.export_trim.emit('clicked')
+    assert not e.export_trim.get_sensitive()
+    job = win.queue.jobs[-1]
+    yield Wait(lambda: job.finished, 'selection export')
+    assert job.state == DONE and not job.plan.replace_original
+    assert job.result.output.endswith('_clip.mp4'), job.result.output
+    assert abs(probe(job.result.output).duration - 1.5) < 0.1
+    assert os.path.exists(path) and win.library.find(path) is not None
+    assert e.replacing and e.recipe().trimmed()
+    assert win.stack.get_visible_child_name() == 'edit'
+    e.save_mode.set_active_name('new')
+    yield 0.8
+    assert e.export_trim.get_sensitive()
     stream = e.player.video.get_media_stream()
     yield Wait(lambda: stream.is_seekable(), 'seekable player')
     e.preview_trim.emit('clicked')
@@ -47,6 +66,7 @@ def scenario(app, win):
     yield 0.3
     assert not e.recipe().trimmed()
     assert t.start == 0 and t.end == t.duration
+    assert not e.export_trim.get_sensitive()
     e._range_changed(0.5, 2)
     yield 0.3
     screenshot(win, 'screenshots/trim-wide.png')

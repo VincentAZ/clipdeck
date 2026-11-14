@@ -112,7 +112,8 @@ class EditPage(Gtk.Box):
         self.reset_trim.connect("clicked", self._reset_trim)
         heading.append(self.reset_trim)
         self.trim_panel.append(heading)
-        hint = Gtk.Label(label="Drag the handles to keep the part you want.", xalign=0, wrap=True)
+        hint = Gtk.Label(label="Drag the handles to select a part. Export it as its own clip, "
+                               "or trim the edit to it.", xalign=0, wrap=True)
         hint.add_css_class("dim-label")
         self.trim_panel.append(hint)
         self.timeline = TrimTimeline(self._range_changed, self._seek_trim)
@@ -121,6 +122,12 @@ class EditPage(Gtk.Box):
         self.preview_trim = Gtk.Button(label="Preview selection")
         self.preview_trim.connect("clicked", self._preview_trim)
         transport.append(self.preview_trim)
+        self.export_trim = Gtk.Button(label="Export selection",
+                                      tooltip_text="Save only the selected part as a new file "
+                                                   "with the output settings; the original "
+                                                   "and this edit are left as they are")
+        self.export_trim.connect("clicked", self._export_trim)
+        transport.append(self.export_trim)
         self.trim_length = Gtk.Label(xalign=1, hexpand=True)
         self.trim_length.add_css_class("caption")
         transport.append(self.trim_length)
@@ -660,9 +667,9 @@ class EditPage(Gtk.Box):
         self.player.load(first.path if first else None, first.info if first else None)
         self._sync_visibility()
 
-    def _plans(self):
+    def _plans(self, r: Recipe | None = None):
         """(valid plans, errors as 'name: message') for the current form and selection."""
-        r = self.recipe()
+        r = r or self.recipe()
         plans, errors = [], []
         taken = self.ctx.taken()
         for it in self.items:
@@ -757,6 +764,32 @@ class EditPage(Gtk.Box):
         else:
             self._schedule()
 
+    def _export_trim(self, *_):
+        """Queue just the selected range as a new file. The original is never replaced,
+        whatever Save as says, and the form is left as it is for further exports."""
+        try:
+            r = self.recipe()
+        except InputError as e:
+            self.ctx.toast(str(e))
+            return
+        if not r.trimmed():
+            return
+        r.replace_original = False
+        r.suffix = r.suffix.replace("_trim", "_clip", 1)
+        plans, errors = self._plans(r)
+        for p in plans:
+            self.ctx.submit(p)
+        if len(plans) == 1:
+            self.ctx.toast(f"Exporting selection → {os.path.basename(plans[0].output)}")
+        elif plans:
+            self.ctx.toast(f"Exporting the selection of {len(plans)} clips")
+        else:
+            self.ctx.toast(errors[0] if errors else "Nothing to export")
+            return
+        # a double click must not export twice
+        self.export_trim.set_sensitive(False)
+        GLib.timeout_add(700, lambda: self._sync_trim() and False)
+
     # ================================================================== helpers
     def _mark(self, start: bool):
         pos = self.player.position()
@@ -790,6 +823,8 @@ class EditPage(Gtk.Box):
         self.timeline.set_sensitive(duration > 0)
         self.timeline.queue_draw()
         self.preview_trim.set_sensitive(valid and self.player.path is not None)
+        whole = start <= 0 and end >= duration
+        self.export_trim.set_sensitive(valid and self.trim.get_enable_expansion() and not whole)
         text = f"Keep {fmt_time_entry(end - start)}" if valid else "Check trim times"
         if len(self.items) > 1:
             text += f" · {len(self.items)} clips"
